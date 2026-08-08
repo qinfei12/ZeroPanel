@@ -1,6 +1,7 @@
-#!/data/data/com.termux/files/usr/bin/bash
-# ZeroPanel v2.0 - Termux / ZeroTermux 轻量版安装脚本
-# 仅适用于 Termux 环境
+#!/bin/bash
+# ZeroPanel v2.0 - Linux (Ubuntu/Debian) 版安装脚本
+# 适用于 Ubuntu / Debian 等 Linux 服务器环境
+# 安装时自动识别系统版本，并为受支持的 Debian/Ubuntu 自动添加 PHP 多版本源 (SURY)
 
 set -e
 set -o pipefail
@@ -15,11 +16,11 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 # 固定路径
-PANEL_DIR="$HOME/.zeropanel"
-WWW_DIR="$HOME/www"
+PANEL_DIR="/var/lib/zeropanel"
+WWW_DIR="/var/www"
 DATA_DIR="$PANEL_DIR/data"
 # 统一备份根目录：云更新备份与卸载备份共用（与面板目录平级，卸载不影响）
-BACKUP_ROOT="$HOME/.zeropanel_backups"
+BACKUP_ROOT="/var/lib/zeropanel_backups"
 PANEL_DOWNLOAD_URL="https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel_v2.zip"
 
 # 打印分隔线
@@ -31,7 +32,7 @@ print_separator() {
 print_title() {
     print_separator
     echo -e "                    ${WHITE}ZeroPanel v2.0${NC}"
-    echo -e "                ${CYAN}Termux / ZeroTermux 轻量版${NC}"
+    echo -e "                ${CYAN}Linux (Ubuntu/Debian) 版${NC}"
     print_separator
 }
 
@@ -51,7 +52,53 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# 备份面板数据到统一备份根目录（tar 优先，失败回退目录拷贝，再失败输出空串）
+# 检测系统是否使用 systemd 管理 services
+have_systemd() {
+    [ -d /run/systemd/system ] && return 0
+    if [ -L /sbin/init ]; then
+        readlink -f /sbin/init 2>/dev/null | grep -q systemd && return 0
+    fi
+    return 1
+}
+
+# 启动系统服务：优先 systemctl，其次 service，最后直接启动守护进程
+start_service() {
+    local service_name=$1
+    shift
+    local daemon_cmd="$*"
+
+    if have_systemd; then
+        if systemctl start "$service_name" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    if service "$service_name" start >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ -n "$daemon_cmd" ]; then
+        # shellcheck disable=SC2086
+        nohup $daemon_cmd >/dev/null 2>&1 &
+        return 0
+    fi
+    return 1
+}
+
+# 停止系统服务：优先 systemctl，其次 service，最后 pkill
+stop_service() {
+    local service_name=$1
+    local pkill_pattern=$2
+
+    if have_systemd; then
+        systemctl stop "$service_name" >/dev/null 2>&1 && return 0
+    fi
+    service "$service_name" stop >/dev/null 2>&1 && return 0
+    if [ -n "$pkill_pattern" ]; then
+        pkill -f "$pkill_pattern" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# 备份面板数据到统一备份目录（与云更新备份共用同一目录），返回备份路径
 backup_panel_data() {
     local stamp=$(date +%Y%m%d%H%M%S)
     mkdir -p "$BACKUP_ROOT"
@@ -79,23 +126,99 @@ detect_python_cmd() {
 }
 
 # 环境校验
-check_termux_environment() {
-    if [ -z "$PREFIX" ]; then
-        PREFIX="/data/data/com.termux/files/usr"
-        export PREFIX
+check_linux_environment() {
+    local distro=""
+
+    if [ -f "/etc/os-release" ]; then
+        distro=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
     fi
 
-    if [ -n "$TERMUX_VERSION" ] || [[ "$PREFIX" == *"com.termux"* ]] || [ -d "/data/data/com.termux" ]; then
+    if [ "$distro" = "debian" ] || [ "$distro" = "ubuntu" ]; then
         return 0
     fi
 
     echo ""
-    print_error "当前环境不是 Termux / ZeroTermux"
+    print_error "当前环境不是 Ubuntu / Debian Linux"
     echo ""
-    echo -e "  ${WHITE}本脚本仅支持 Termux / ZeroTermux 环境${NC}"
-    echo -e "  ${WHITE}Proot (Ubuntu/Debian) 请使用 zeropanel-proot 版本的安装脚本${NC}"
+    echo -e "  ${WHITE}本脚本仅支持 Ubuntu / Debian 等 Linux 环境${NC}"
     echo ""
     exit 1
+}
+
+# 检测操作系统发行版与版本代号
+detect_os() {
+    OS_ID=""
+    OS_VERSION_ID=""
+    OS_CODENAME=""
+
+    if [ -f "/etc/os-release" ]; then
+        OS_ID=$(grep -E '^ID=' /etc/os-release | head -1 | cut -d= -f2 | tr -d '"')
+        OS_VERSION_ID=$(grep -E '^VERSION_ID=' /etc/os-release | head -1 | cut -d= -f2 | tr -d '"')
+        OS_CODENAME=$(grep -E '^VERSION_CODENAME=' /etc/os-release | head -1 | cut -d= -f2 | tr -d '"')
+    fi
+
+    if [ -z "$OS_CODENAME" ] && command_exists lsb_release; then
+        OS_CODENAME=$(lsb_release -sc 2>/dev/null)
+    fi
+
+    [ -z "$OS_ID" ] && OS_ID="unknown"
+    [ -z "$OS_VERSION_ID" ] && OS_VERSION_ID="unknown"
+    [ -z "$OS_CODENAME" ] && OS_CODENAME="unknown"
+    return 0
+}
+
+# 判断系统是否在 PHP 多版本源 (SURY) 支持列表内
+is_sury_supported() {
+    case "${OS_ID}:${OS_CODENAME}" in
+        debian:buster|debian:bullseye|debian:bookworm|debian:trixie|debian:sid)
+            return 0 ;;
+        ubuntu:focal|ubuntu:jammy|ubuntu:noble)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+# 添加 PHP 多版本源 (SURY)，使面板可安装任意 PHP 版本
+add_php_repo() {
+    local keyring_deb="/tmp/debsuryorg-archive-keyring.deb"
+
+    if [ -z "$OS_CODENAME" ] || [ "$OS_CODENAME" = "unknown" ]; then
+        print_warning "无法识别系统版本代号，跳过第三方源"
+        return 1
+    fi
+
+    # 确保密钥包依赖已安装
+    apt-get install -y ca-certificates curl >/dev/null 2>&1 || true
+
+    if [ ! -f "/usr/share/keyrings/debsuryorg-archive-keyring.gpg" ]; then
+        echo -e "  ${CYAN}下载 PHP 源密钥...${NC}"
+        if ! curl -fsSL -o "$keyring_deb" "https://packages.sury.org/debsuryorg-archive-keyring.deb"; then
+            print_warning "PHP 源密钥下载失败，跳过第三方源"
+            return 1
+        fi
+
+        if ! dpkg -i "$keyring_deb" >/dev/null 2>&1; then
+            # 依赖问题：尝试修复后重装
+            apt-get install -y -f >/dev/null 2>&1 || true
+            dpkg -i "$keyring_deb" >/dev/null 2>&1 || {
+                print_warning "PHP 源密钥安装失败，跳过第三方源"
+                return 1
+            }
+        fi
+
+        if [ ! -f "/usr/share/keyrings/debsuryorg-archive-keyring.gpg" ]; then
+            print_warning "PHP 源密钥文件未生成，跳过第三方源"
+            return 1
+        fi
+    else
+        print_success "PHP 源密钥已存在"
+    fi
+
+    echo -e "  ${CYAN}写入 PHP 源文件: /etc/apt/sources.list.d/php.sury.org.list${NC}"
+    echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ ${OS_CODENAME} main" > /etc/apt/sources.list.d/php.sury.org.list
+    print_success "PHP 多版本源已添加"
+    return 0
 }
 
 # 仅卸载面板程序文件（保留网站、数据、相关服务）
@@ -105,23 +228,24 @@ uninstall_panel_only() {
     echo -e "  ${YELLOW}仅卸载面板程序文件${NC}"
     echo -e "  ${WHITE}保留内容:${NC}"
     echo -e "    - 网站文件: ${CYAN}$WWW_DIR${NC}"
-    echo -e "    - 面板数据: ${CYAN}$DATA_DIR${NC}（可先备份到统一备份目录）"
     echo -e "    - 相关服务: Nginx / MariaDB / PHP-FPM"
+    echo -e "  ${WHITE}面板数据:${NC} 可选择备份到统一备份目录，或直接删除"
     echo ""
-    read -p "确定仅卸载面板程序？数据与网站将保留。 [y/N]: " confirm
+    read -p "确定仅卸载面板程序？ [y/N]: " confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
         echo -e "  ${CYAN}停止面板进程...${NC}"
         pkill -f "python3 app.py" 2>/dev/null || true
         pkill -f "python app.py" 2>/dev/null || true
         sleep 1
 
-        data_backup_path=""
+        local data_backup_path=""
         if [ -d "$PANEL_DIR/data" ]; then
-            read -p "  是否备份面板数据到统一备份目录 $BACKUP_ROOT ？[Y/n]: " do_backup
+            echo ""
+            read -p "是否备份面板数据到统一备份目录 $BACKUP_ROOT ？[Y/n]: " do_backup
             if [ -z "$do_backup" ] || [ "$do_backup" = "y" ] || [ "$do_backup" = "Y" ]; then
                 data_backup_path=$(backup_panel_data)
                 if [ -n "$data_backup_path" ]; then
-                    echo -e "  ${GREEN}面板数据已备份到: ${CYAN}$data_backup_path${NC}"
+                    echo -e "  ${GREEN}✓${NC} 面板数据已备份到: ${CYAN}$data_backup_path${NC}"
                 else
                     print_warning "备份失败，将继续卸载"
                 fi
@@ -140,15 +264,13 @@ uninstall_panel_only() {
         echo ""
         echo -e "  ${WHITE}已保留:${NC}"
         echo -e "    - 网站文件: ${CYAN}$WWW_DIR${NC}"
+        echo -e "    - 相关服务: Nginx / MariaDB / PHP-FPM"
         if [ -n "$data_backup_path" ]; then
             echo -e "    - 面板数据备份: ${CYAN}$data_backup_path${NC}"
+            echo ""
+            echo -e "  ${YELLOW}如需恢复：重新运行安装脚本后，解压该备份到 ${CYAN}$PANEL_DIR/data${NC}"
         else
             echo -e "    - 面板数据: ${YELLOW}未备份（已删除）${NC}"
-        fi
-        echo -e "    - 相关服务: Nginx / MariaDB / PHP-FPM"
-        echo ""
-        if [ -n "$data_backup_path" ]; then
-            echo -e "  ${YELLOW}如需恢复：重新运行安装脚本后，解压该备份到 ${CYAN}$PANEL_DIR/data${NC}"
         fi
     else
         echo -e "  ${YELLOW}已取消卸载${NC}"
@@ -163,29 +285,32 @@ uninstall_full() {
     echo -e "  ${WHITE}将删除:${NC}"
     echo -e "    - 面板程序与数据: ${CYAN}$PANEL_DIR${NC}"
     echo -e "    - 网站文件: ${CYAN}$WWW_DIR${NC}"
-    echo -e "    - Nginx 站点配置: ${CYAN}$PREFIX/etc/nginx/conf.d/zeropanel*.conf${NC}"
-    echo -e "    - 快捷命令: ${CYAN}$HOME/bin/zeropanel${NC}"
+    echo -e "    - Nginx 站点配置: ${CYAN}/etc/nginx/conf.d/zeropanel*.conf${NC}"
+    echo -e "    - 快捷命令: ${CYAN}/usr/local/bin/zeropanel${NC}"
     echo -e "    - 相关服务: ${CYAN}Nginx / MariaDB / PHP-FPM${NC}"
-    echo -e "    - MariaDB 数据目录: ${CYAN}$PREFIX/var/lib/mysql${NC}"
+    echo -e "    - MariaDB 数据目录: ${CYAN}/var/lib/mysql${NC}"
     echo ""
     read -p "此操作不可恢复！确认完全卸载？[y/N]: " confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
         echo -e "  ${CYAN}停止相关服务...${NC}"
+        stop_service nginx nginx
+        stop_service mysql mysqld
+        stop_service mariadb mariadbd
+        for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+            stop_service "php${ver//./}-fpm" "php${ver//./}-fpm" 2>/dev/null || true
+        done
         pkill -f "python3 app.py" 2>/dev/null || true
         pkill -f "python app.py" 2>/dev/null || true
-        nginx -s stop 2>/dev/null || true
-        pkill -x mysqld 2>/dev/null || true
-        pkill -x mariadbd 2>/dev/null || true
-        pkill -f php-fpm 2>/dev/null || true
         sleep 2
 
-        data_backup_path=""
+        local data_backup_path=""
         if [ -d "$PANEL_DIR/data" ]; then
-            read -p "  是否备份面板数据到统一备份目录 $BACKUP_ROOT ？[Y/n]: " do_backup
+            echo ""
+            read -p "是否备份面板数据到统一备份目录 $BACKUP_ROOT ？[Y/n]: " do_backup
             if [ -z "$do_backup" ] || [ "$do_backup" = "y" ] || [ "$do_backup" = "Y" ]; then
                 data_backup_path=$(backup_panel_data)
                 if [ -n "$data_backup_path" ]; then
-                    echo -e "  ${GREEN}面板数据已备份到: ${CYAN}$data_backup_path${NC}"
+                    echo -e "  ${GREEN}✓${NC} 面板数据已备份到: ${CYAN}$data_backup_path${NC}"
                 else
                     print_warning "备份失败，将继续卸载"
                 fi
@@ -197,25 +322,21 @@ uninstall_full() {
         echo -e "  ${CYAN}删除面板、网站与配置...${NC}"
         rm -rf "$PANEL_DIR"
         rm -rf "$WWW_DIR"
-        rm -f "$PREFIX"/etc/nginx/conf.d/zeropanel*.conf
-        rm -f "$HOME/bin/zeropanel"
+        rm -f /etc/nginx/conf.d/zeropanel*.conf
+        rm -f /usr/local/bin/zeropanel
+        rm -f /etc/apt/sources.list.d/php.sury.org.list
 
-        echo -e "  ${CYAN}移除 PATH 配置...${NC}"
-        if [ -f "$HOME/.bashrc" ]; then
-            grep -v 'export PATH="$HOME/bin:$PATH"' "$HOME/.bashrc" > "$HOME/.bashrc.tmp" && mv "$HOME/.bashrc.tmp" "$HOME/.bashrc" || rm -f "$HOME/.bashrc.tmp"
-        fi
-
-        echo -e "  ${CYAN}卸载相关服务 (nginx / mariadb / php-fpm)...${NC}"
-        pkg uninstall -y nginx mariadb php-fpm 2>&1 | tail -n 3 || true
-        rm -rf "$PREFIX/var/lib/mysql"
+        echo -e "  ${CYAN}卸载相关服务 (nginx / mariadb-server / php-fpm / php-mysql)...${NC}"
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge nginx mariadb-server php-fpm php-mysql 2>&1 | tail -n 3 || true
+        rm -rf /var/lib/mysql
 
         echo ""
         print_separator
         echo -e "              ${GREEN}ZeroPanel 已完全卸载${NC}"
         print_separator
         echo ""
-        if [ -n "$data_backup_path" ]; then
-            echo -e "  ${YELLOW}数据备份: ${CYAN}$data_backup_path${NC}"
+        if [ -n "${data_backup_path:-}" ]; then
+            echo -e "  ${YELLOW}面板数据备份: ${CYAN}$data_backup_path${NC}"
             echo -e "  ${YELLOW}如需恢复：重新安装面板后，解压该备份到 ${CYAN}$PANEL_DIR/data${NC}"
         fi
     else
@@ -224,10 +345,10 @@ uninstall_full() {
 }
 
 # 卸载流程（选择卸载方式）
-uninstall_termux() {
+uninstall_linux() {
     print_title
     echo ""
-    echo -e "  ${YELLOW}卸载 ZeroPanel (Termux 轻量版)${NC}"
+    echo -e "  ${YELLOW}卸载 ZeroPanel (Linux 版)${NC}"
     echo ""
     echo -e "  ${WHITE}请选择卸载方式:${NC}"
     echo ""
@@ -242,24 +363,69 @@ uninstall_termux() {
     esac
 }
 
+# 启动所有已安装的 PHP-FPM 版本（优先 systemctl/service，回退直接启动）
+start_php_fpm_all() {
+    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+        local svc="php${ver//./}-fpm"
+        if command_exists "$svc" 2>/dev/null && ! pgrep -f "$svc" >/dev/null; then
+            if have_systemd; then
+                systemctl start "$svc" >/dev/null 2>&1 || service "$svc" start >/dev/null 2>&1 || "$svc" 2>/dev/null || true
+            else
+                service "$svc" start >/dev/null 2>&1 || "$svc" 2>/dev/null || true
+            fi
+        elif command_exists "php-fpm$ver" 2>/dev/null && ! pgrep -f "php-fpm$ver" >/dev/null; then
+            if have_systemd; then
+                systemctl start "php-fpm$ver" >/dev/null 2>&1 || service "php-fpm$ver" start >/dev/null 2>&1 || "php-fpm$ver" 2>/dev/null || true
+            else
+                service "php-fpm$ver" start >/dev/null 2>&1 || "php-fpm$ver" 2>/dev/null || true
+            fi
+        fi
+    done
+}
+
 # 安装流程
-install_termux() {
+install_linux() {
     local total_steps=9
 
-    # 步骤 1: 更新软件源
-    print_step 1 $total_steps "更新软件源"
-    echo -e "  ${CYAN}正在更新包管理器...${NC}"
-    if pkg update -y 2>&1 | tail -n 5; then
-        print_success "软件源更新完成"
-    else
+    # 步骤 1: 检测系统并配置软件源
+    print_step 1 $total_steps "检测系统并配置软件源"
+    detect_os
+    echo -e "  检测到系统: ${WHITE}${OS_ID} ${OS_VERSION_ID} (${OS_CODENAME})${NC}"
+
+    echo -e "  ${CYAN}apt-get update (官方源)...${NC}"
+    if ! apt-get update -y 2>&1 | tail -n 5; then
         print_error "软件源更新失败"
         exit 1
+    fi
+    print_success "官方软件源更新完成"
+
+    PHP_REPO_ADDED=0
+    if is_sury_supported "$OS_ID" "$OS_CODENAME"; then
+        echo -e "  ${CYAN}添加 PHP 多版本源 (SURY)...${NC}"
+        if add_php_repo; then
+            PHP_REPO_ADDED=1
+            if ! apt-get update -y 2>&1 | tail -n 5; then
+                print_warning "PHP 源更新失败，移除第三方源后继续（仅可使用官方源自带的 PHP 版本）"
+                rm -f /etc/apt/sources.list.d/php.sury.org.list
+                PHP_REPO_ADDED=0
+                apt-get update -y >/dev/null 2>&1 || true
+            else
+                print_success "PHP 多版本源更新完成"
+            fi
+        fi
+    else
+        print_warning "系统 ($OS_ID $OS_CODENAME) 不在 PHP 多版本源支持列表，仅可使用官方源自带的 PHP 版本"
     fi
 
     # 步骤 2: 安装系统依赖
     print_step 2 $total_steps "安装系统依赖"
-    echo -e "  ${CYAN}正在安装 Python、Nginx、MariaDB、PHP-FPM、curl、unzip...${NC}"
-    if pkg install -y python nginx mariadb php-fpm curl unzip zip 2>&1 | tail -n 3; then
+    echo -e "  ${CYAN}正在安装 Nginx、MariaDB、PHP-FPM、Python3...${NC}"
+    local deps="python3 python3-pip nginx mariadb-server php-fpm php-mysql curl unzip cron"
+    if [ "$PHP_REPO_ADDED" = "1" ]; then
+        echo -e "  ${YELLOW}已启用 PHP 多版本源，将同时安装面板默认使用的 PHP 8.0 及常用扩展${NC}"
+        deps="$deps php8.0-fpm php8.0-mysql php8.0-curl php8.0-gd php8.0-mbstring php8.0-xml php8.0-zip php8.0-bcmath php8.0-opcache php8.0-intl"
+    fi
+    if apt-get install -y $deps 2>&1 | tail -n 3; then
         print_success "系统依赖安装完成"
     else
         print_error "系统依赖安装失败"
@@ -267,45 +433,46 @@ install_termux() {
     fi
 
     # 步骤 3: 下载面板
-    print_step 3 $total_steps "下载面板文件"
-    echo -e "  ${CYAN}正在从 GitHub 下载 ZeroPanel...${NC}"
-    echo -e "    下载地址: ${WHITE}$PANEL_DOWNLOAD_URL${NC}"
+    print_step 3 $total_steps "下载面板"
+    echo -e "  ${CYAN}正在下载 ZeroPanel Linux 版...${NC}"
+    echo -e "    地址: ${WHITE}$PANEL_DOWNLOAD_URL${NC}"
 
     local tmp_dir=$(mktemp -d)
     local zip_file="$tmp_dir/zeropanel_v2.zip"
 
     if curl -fsSL -o "$zip_file" "$PANEL_DOWNLOAD_URL"; then
-        print_success "面板文件下载完成"
+        print_success "面板下载完成"
     else
-        print_error "面板文件下载失败，请检查网络连接"
+        print_error "面板下载失败，请检查网络"
         rm -rf "$tmp_dir"
         exit 1
     fi
 
-    # 步骤 4: 解压面板
+    # 步骤 4: 部署面板
     print_step 4 $total_steps "部署面板"
     echo -e "  ${CYAN}正在解压到 $PANEL_DIR...${NC}"
 
     if [ -d "$PANEL_DIR" ]; then
         if [ -d "$PANEL_DIR/data" ]; then
-            local backup_dir="$HOME/zeropanel_data_backup_$(date +%Y%m%d%H%M%S)"
-            echo -e "  ${YELLOW}检测到旧面板目录，备份数据到 $backup_dir${NC}"
+            local backup_dir="/var/lib/zeropanel_data_backup_$(date +%Y%m%d%H%M%S)"
+            echo -e "  ${YELLOW}备份数据到 $backup_dir${NC}"
             cp -r "$PANEL_DIR/data" "$backup_dir"
         fi
         rm -rf "$PANEL_DIR"
     fi
 
-    mkdir -p "$PANEL_DIR"
-
-    if unzip -q "$zip_file" -d "$HOME"; then
+    local extract_tmp=$(mktemp -d)
+    if unzip -q "$zip_file" -d "$extract_tmp"; then
+        # zip 顶层目录为 zeropanel，需移动到 /var/lib/zeropanel
+        rm -rf "$PANEL_DIR"
+        mv "$extract_tmp/zeropanel" "$PANEL_DIR"
         print_success "面板部署完成"
     else
         print_error "面板解压失败"
-        rm -rf "$tmp_dir"
+        rm -rf "$tmp_dir" "$extract_tmp"
         exit 1
     fi
-
-    rm -rf "$tmp_dir"
+    rm -rf "$tmp_dir" "$extract_tmp"
 
     # 步骤 5: 安装 Python 依赖
     print_step 5 $total_steps "安装 Python 依赖"
@@ -315,6 +482,8 @@ install_termux() {
         print_success "Python 依赖安装完成"
     elif pip_output=$(pip3 install flask flask-cors werkzeug 2>&1); then
         print_success "Python 依赖安装完成"
+    elif pip_output=$(apt-get install -y python3-flask python3-flask-cors python3-werkzeug 2>&1); then
+        print_success "Python 依赖安装完成"
     else
         print_error "Python 依赖安装失败"
         echo "$pip_output" | tail -n 10
@@ -323,63 +492,56 @@ install_termux() {
 
     # 步骤 6: 初始化 MariaDB
     print_step 6 $total_steps "初始化 MariaDB"
-    echo -e "  ${CYAN}检查数据库目录...${NC}"
-    if [ ! -d "$PREFIX/var/lib/mysql/mysql" ]; then
-        echo -e "  ${CYAN}正在初始化数据库...${NC}"
-        if mysql_install_db --ldata="$PREFIX/var/lib/mysql" 2>&1 | tail -n 2; then
-            print_success "MariaDB 初始化完成"
-        else
-            print_error "MariaDB 初始化失败"
-            exit 1
-        fi
-    else
-        print_success "MariaDB 已初始化"
+    echo -e "  ${CYAN}启动并配置 MariaDB...${NC}"
+    if ! pgrep -x mysqld > /dev/null && ! pgrep -x mariadbd > /dev/null; then
+        start_service mysql mysqld_safe
+        sleep 3
     fi
 
-    # 步骤 7: 配置运行环境
+    # 设置 root 无密码访问（本地开发环境）
+    mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '';" 2>/dev/null || true
+    mysql -u root -e "UPDATE mysql.user SET plugin='mysql_native_password' WHERE User='root'; FLUSH PRIVILEGES;" 2>/dev/null || true
+    print_success "MariaDB 初始化完成"
+
+    # 步骤 7: 配置 PHP-FPM 和 Nginx
     print_step 7 $total_steps "配置运行环境"
-    echo -e "  ${CYAN}正在创建目录...${NC}"
+    echo -e "  ${CYAN}创建目录...${NC}"
     mkdir -p "$WWW_DIR"
     mkdir -p "$DATA_DIR"
-    mkdir -p "$PREFIX/etc/nginx/conf.d"
-    mkdir -p "$PREFIX/var/log/nginx"
-    mkdir -p "$PREFIX/var/run"
-    mkdir -p "$PREFIX/var/run/php-fpm"
+    mkdir -p "/etc/nginx/conf.d"
+    mkdir -p "/var/log/nginx"
+    mkdir -p "/run/php"
     print_success "目录创建完成"
 
-    echo -e "  ${CYAN}配置 PHP-FPM Socket...${NC}"
-    PHP_FPM_POOL="$PREFIX/etc/php-fpm.d/www.conf"
-    PHP_FPM_SOCK="$PREFIX/var/run/php-fpm.sock"
+    echo -e "  ${CYAN}配置 PHP-FPM...${NC}"
+    # 查找可用的 PHP-FPM 版本，每个版本使用独立 socket
+    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+        local pool_conf="/etc/php/${ver}/fpm/pool.d/www.conf"
+        if [ -f "$pool_conf" ]; then
+            cp "$pool_conf" "$pool_conf.bak"
+            sed -i "s|^listen =.*|listen = /run/php/php${ver}-fpm.sock|" "$pool_conf"
+        fi
+    done
+    print_success "PHP-FPM 已配置独立 socket"
 
-    if [ -f "$PHP_FPM_POOL" ]; then
-        cp "$PHP_FPM_POOL" "$PHP_FPM_POOL.bak"
-        sed -i "s|^listen =.*|listen = $PHP_FPM_SOCK|" "$PHP_FPM_POOL"
-        print_success "PHP-FPM 已配置监听 $PHP_FPM_SOCK"
-    else
-        print_warning "未找到 $PHP_FPM_POOL，请确认 php-fpm 已正确安装"
+    echo -e "  ${CYAN}配置 Nginx...${NC}"
+    if [ -f "/etc/nginx/nginx.conf" ]; then
+        cp "/etc/nginx/nginx.conf" "/etc/nginx/nginx.conf.bak"
     fi
+    rm -f /etc/nginx/conf.d/default.conf 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 
-    echo -e "  ${CYAN}写入 Nginx 配置...${NC}"
-    NGINX_CONF="$PREFIX/etc/nginx/nginx.conf"
-
-    if [ -f "$NGINX_CONF" ]; then
-        cp "$NGINX_CONF" "$NGINX_CONF.bak"
-    fi
-
-    rm -f "$PREFIX/etc/nginx/conf.d/default.conf" 2>/dev/null || true
-    rm -f "$PREFIX/etc/nginx/sites-enabled/default" 2>/dev/null || true
-
-    cat > "$NGINX_CONF" << EOF
-worker_processes 1;
-error_log $PREFIX/var/log/nginx/error.log;
-pid $PREFIX/var/run/nginx.pid;
+    cat > /etc/nginx/nginx.conf << 'EOF'
+worker_processes auto;
+error_log /var/log/nginx/error.log;
+pid /run/nginx.pid;
 
 events {
     worker_connections 1024;
 }
 
 http {
-    include $PREFIX/etc/nginx/mime.types;
+    include /etc/nginx/mime.types;
     default_type application/octet-stream;
 
     sendfile on;
@@ -389,7 +551,7 @@ http {
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
-    include $PREFIX/etc/nginx/conf.d/*.conf;
+    include /etc/nginx/conf.d/*.conf;
 }
 EOF
     print_success "Nginx 配置完成"
@@ -398,30 +560,62 @@ EOF
     print_step 8 $total_steps "配置快捷命令"
     echo -e "  ${CYAN}创建 zeropanel 命令...${NC}"
 
-    mkdir -p "$HOME/bin"
-
-    cat > "$HOME/bin/zeropanel" << 'SCRIPT'
-#!/data/data/com.termux/files/usr/bin/bash
-
-PANEL_DIR="$HOME/.zeropanel"
+    mkdir -p "/usr/local/bin"
+    cat > /usr/local/bin/zeropanel << SCRIPT
+#!/bin/bash
+PANEL_DIR="$PANEL_DIR"
 LOG_FILE="$PANEL_DIR/data/panel.log"
 DATA_DIR="$PANEL_DIR/data"
-WWW_DIR="$HOME/www"
-BACKUP_ROOT="$HOME/.zeropanel_backups"
-[ -z "$PREFIX" ] && PREFIX="/data/data/com.termux/files/usr"
+WWW_DIR="/var/www"
+BACKUP_ROOT="$BACKUP_ROOT"
+mkdir -p "\$DATA_DIR"
 
-mkdir -p "$DATA_DIR"
+have_systemd() {
+    [ -d /run/systemd/system ] && return 0
+    if [ -L /sbin/init ]; then
+        readlink -f /sbin/init 2>/dev/null | grep -q systemd && return 0
+    fi
+    return 1
+}
+
+start_service() {
+    local service_name=\$1
+    shift
+    local daemon_cmd="\$*"
+    if have_systemd; then
+        systemctl start "\$service_name" >/dev/null 2>&1 && return 0
+    fi
+    service "\$service_name" start >/dev/null 2>&1 && return 0
+    if [ -n "\$daemon_cmd" ]; then
+        nohup \$daemon_cmd >/dev/null 2>&1 &
+        return 0
+    fi
+    return 1
+}
+
+stop_service() {
+    local service_name=\$1
+    local pkill_pattern=\$2
+    if have_systemd; then
+        systemctl stop "\$service_name" >/dev/null 2>&1 && return 0
+    fi
+    service "\$service_name" stop >/dev/null 2>&1 && return 0
+    if [ -n "\$pkill_pattern" ]; then
+        pkill -f "\$pkill_pattern" 2>/dev/null || true
+    fi
+    return 0
+}
 
 backup_panel_data() {
-    local stamp=$(date +%Y%m%d%H%M%S)
-    mkdir -p "$BACKUP_ROOT"
-    local dest="$BACKUP_ROOT/zeropanel_data_${stamp}.tar.gz"
-    if command -v tar >/dev/null 2>&1 && tar -czf "$dest" -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")" >/dev/null 2>&1; then
-        echo "$dest"
+    local stamp=\$(date +%Y%m%d%H%M%S)
+    mkdir -p "\$BACKUP_ROOT"
+    local dest="\$BACKUP_ROOT/zeropanel_data_\${stamp}.tar.gz"
+    if command -v tar >/dev/null 2>&1 && tar -czf "\$dest" -C "\$(dirname "\$DATA_DIR")" "\$(basename "\$DATA_DIR")" >/dev/null 2>&1; then
+        echo "\$dest"
     else
-        local dir_dest="$BACKUP_ROOT/zeropanel_data_${stamp}"
-        if cp -r "$DATA_DIR" "$dir_dest" >/dev/null 2>&1; then
-            echo "$dir_dest"
+        local dir_dest="\$BACKUP_ROOT/zeropanel_data_\${stamp}"
+        if cp -r "\$DATA_DIR" "\$dir_dest" >/dev/null 2>&1; then
+            echo "\$dir_dest"
         else
             echo ""
         fi
@@ -434,68 +628,76 @@ python_cmd() {
     else echo ""; fi
 }
 
-check_service() {
-    local pattern="$1"
-    if ls /proc/[0-9]*/cmdline 2>/dev/null | xargs -r grep -l -z "$pattern" 2>/dev/null | head -1 > /dev/null; then
-        echo -e "\033[0;32m运行中\033[0m"; return
-    fi
-    for pid_dir in /proc/[0-9]*; do
-        [ -d "$pid_dir" ] || continue
-        exe_link=$(readlink "$pid_dir/exe" 2>/dev/null || true)
-        if [ -n "$exe_link" ] && (echo "$exe_link" | grep -qE "${pattern}$"); then
-            echo -e "\033[0;32m运行中\033[0m"; return
+start_php_fpm_all() {
+    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+        local svc="php\${ver//./}-fpm"
+        if command -v "\$svc" >/dev/null 2>&1 && ! pgrep -f "\$svc" >/dev/null; then
+            if have_systemd; then
+                systemctl start "\$svc" >/dev/null 2>&1 || service "\$svc" start >/dev/null 2>&1 || "\$svc" 2>/dev/null || true
+            else
+                service "\$svc" start >/dev/null 2>&1 || "\$svc" 2>/dev/null || true
+            fi
+        elif command -v "php-fpm\$ver" >/dev/null 2>&1 && ! pgrep -f "php-fpm\$ver" >/dev/null; then
+            if have_systemd; then
+                systemctl start "php-fpm\$ver" >/dev/null 2>&1 || service "php-fpm\$ver" start >/dev/null 2>&1 || "php-fpm\$ver" 2>/dev/null || true
+            else
+                service "php-fpm\$ver" start >/dev/null 2>&1 || "php-fpm\$ver" 2>/dev/null || true
+            fi
         fi
     done
-    echo -e "\033[0;31m已停止\033[0m"
 }
 
-check_panel() {
-    local py_cmd=$(python_cmd)
-    [ -n "$py_cmd" ] && pgrep -f "$py_cmd app.py" > /dev/null && echo -e "\033[0;32m运行中\033[0m" || echo -e "\033[0;31m已停止\033[0m"
-}
-
-case "$1" in
+case "\$1" in
     start)
         echo -e "\033[1;37m启动 ZeroPanel...\033[0m"
-        cd "$PANEL_DIR"
-        PY_CMD=$(python_cmd)
-        [ -z "$PY_CMD" ] && { echo "未找到 python3"; exit 1; }
-        if ! pgrep -f "$PY_CMD app.py" > /dev/null; then
-            nohup $PY_CMD app.py > "$LOG_FILE" 2>&1 &
-            echo "  Panel 已启动"
-        fi
-        if ! pgrep -x mysqld > /dev/null && ! pgrep -x mariadbd > /dev/null; then
-            if command -v mysqld_safe >/dev/null 2>&1; then nohup mysqld_safe > /dev/null 2>&1 &
-            elif command -v mysqld >/dev/null 2>&1; then nohup mysqld > /dev/null 2>&1 &
+        PY_CMD=\$(python_cmd)
+        [ -z "\$PY_CMD" ] && { echo "未找到 python3"; exit 1; }
+
+        # 启动 MariaDB（优先 systemctl/service，回退直接启动守护进程）
+        if ! pgrep -x mysqld >/dev/null && ! pgrep -x mariadbd >/dev/null; then
+            if command -v mysqld_safe >/dev/null 2>&1; then
+                start_service mysql mysqld_safe
+            elif command -v mysqld >/dev/null 2>&1; then
+                start_service mysql mysqld
             fi
-            sleep 3
+            sleep 2
         fi
-        if ! pgrep -f "php-fpm" > /dev/null; then php-fpm 2>/dev/null || true; fi
-        if ! pgrep -x nginx > /dev/null; then nginx 2>/dev/null || true; fi
+
+        # 启动 Nginx
+        if ! pgrep -x nginx >/dev/null; then
+            start_service nginx nginx
+        fi
+
+        # 启动所有已安装的 PHP-FPM 版本
+        start_php_fpm_all
+
+        cd "\$PANEL_DIR"
+        if ! pgrep -f "\$PY_CMD app.py" > /dev/null; then
+            nohup \$PY_CMD app.py > "\$LOG_FILE" 2>&1 &
+        fi
         echo -e "\033[0;36m访问: http://localhost:5000\033[0m"
         ;;
     stop)
         echo -e "\033[1;37m停止 ZeroPanel...\033[0m"
-        PY_CMD=$(python_cmd)
-        [ -n "$PY_CMD" ] && pkill -f "$PY_CMD app.py" 2>/dev/null || true
-        nginx -s stop 2>/dev/null || true
-        pkill -x mysqld 2>/dev/null || true
-        pkill -x mariadbd 2>/dev/null || true
+        PY_CMD=\$(python_cmd)
+        [ -n "\$PY_CMD" ] && pkill -f "\$PY_CMD app.py" 2>/dev/null || true
+        stop_service nginx nginx
+        stop_service mysql mysqld
+        stop_service mariadb mariadbd
         pkill -f php-fpm 2>/dev/null || true
-        echo "  已停止"
         ;;
     restart)
-        "$0" stop; sleep 2; "$0" start
+        "\$0" stop; sleep 2; "\$0" start
         ;;
     status)
         echo -e "\033[1;37m服务状态:\033[0m"
-        echo "  Panel:   $(check_panel)"
-        echo "  Nginx:   $(check_service nginx)"
-        echo "  MariaDB: $(check_service '(mysqld|mariadbd)')"
-        echo "  PHP-FPM: $(check_service php-fpm)"
+        echo "  Panel:   \$(pgrep -f 'python3 app.py' >/dev/null && echo '运行中' || echo '已停止')"
+        echo "  Nginx:   \$(pgrep -x nginx >/dev/null && echo '运行中' || echo '已停止')"
+        echo "  MariaDB: \$(pgrep -x mysqld >/dev/null || pgrep -x mariadbd >/dev/null && echo '运行中' || echo '已停止')"
+        echo "  PHP-FPM: \$(pgrep -f php-fpm >/dev/null && echo '运行中' || echo '已停止')"
         ;;
     log)
-        [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "日志不存在"
+        [ -f "\$LOG_FILE" ] && tail -n 50 "\$LOG_FILE" || echo "日志不存在"
         ;;
     uninstall)
         echo -e "\033[1;37m卸载 ZeroPanel...\033[0m"
@@ -504,18 +706,18 @@ case "$1" in
         echo -e "  \033[0;36m2)\033[0m 完全卸载        - 删除面板、数据、网站，并卸载 Nginx/MariaDB/PHP-FPM 服务"
         echo ""
         read -p "请输入选项 (1/2)，直接回车取消: " mode
-        case "$mode" in
+        case "\$mode" in
             1)
-                PY_CMD=$(python_cmd)
-                [ -n "$PY_CMD" ] && pkill -f "$PY_CMD app.py" 2>/dev/null || true
+                PY_CMD=\$(python_cmd)
+                [ -n "\$PY_CMD" ] && pkill -f "\$PY_CMD app.py" 2>/dev/null || true
                 sleep 1
                 data_backup_path=""
-                if [ -d "$PANEL_DIR/data" ]; then
-                    read -p "  是否备份面板数据到 $BACKUP_ROOT ？[Y/n]: " do_backup
-                    if [ -z "$do_backup" ] || [ "$do_backup" = "y" ] || [ "$do_backup" = "Y" ]; then
-                        data_backup_path=$(backup_panel_data)
-                        if [ -n "$data_backup_path" ]; then
-                            echo "  面板数据已备份到: $data_backup_path"
+                if [ -d "\$PANEL_DIR/data" ]; then
+                    read -p "  是否备份面板数据到 \$BACKUP_ROOT ？[Y/n]: " do_backup
+                    if [ -z "\$do_backup" ] || [ "\$do_backup" = "y" ] || [ "\$do_backup" = "Y" ]; then
+                        data_backup_path=\$(backup_panel_data)
+                        if [ -n "\$data_backup_path" ]; then
+                            echo "  面板数据已备份到: \$data_backup_path"
                         else
                             echo "  [警告] 备份失败，将继续卸载"
                         fi
@@ -523,25 +725,25 @@ case "$1" in
                         echo "  未备份，面板数据将被删除"
                     fi
                 fi
-                rm -rf "$PANEL_DIR"
+                rm -rf "\$PANEL_DIR"
                 echo -e "\033[0;32m面板程序已卸载（网站与服务保留）\033[0m"
-                echo "  网站: $WWW_DIR"
-                if [ -n "$data_backup_path" ]; then
-                    echo "  数据备份: $data_backup_path"
-                    echo "  恢复: 重新运行安装脚本后，解压该备份到 $PANEL_DIR/data"
+                echo "  网站: \$WWW_DIR"
+                if [ -n "\$data_backup_path" ]; then
+                    echo "  数据备份: \$data_backup_path"
+                    echo "  恢复: 重新运行安装脚本后，解压该备份到 \$PANEL_DIR/data"
                 else
                     echo "  面板数据: 未备份（已删除）"
                 fi
                 ;;
             2)
-                "$0" stop
+                "\$0" stop
                 data_backup_path=""
-                if [ -d "$PANEL_DIR/data" ]; then
-                    read -p "  是否备份面板数据到 $BACKUP_ROOT ？[Y/n]: " do_backup
-                    if [ -z "$do_backup" ] || [ "$do_backup" = "y" ] || [ "$do_backup" = "Y" ]; then
-                        data_backup_path=$(backup_panel_data)
-                        if [ -n "$data_backup_path" ]; then
-                            echo "  面板数据已备份到: $data_backup_path"
+                if [ -d "\$PANEL_DIR/data" ]; then
+                    read -p "  是否备份面板数据到 \$BACKUP_ROOT ？[Y/n]: " do_backup
+                    if [ -z "\$do_backup" ] || [ "\$do_backup" = "y" ] || [ "\$do_backup" = "Y" ]; then
+                        data_backup_path=\$(backup_panel_data)
+                        if [ -n "\$data_backup_path" ]; then
+                            echo "  面板数据已备份到: \$data_backup_path"
                         else
                             echo "  [警告] 备份失败，将继续卸载"
                         fi
@@ -549,20 +751,18 @@ case "$1" in
                         echo "  未备份，面板数据将被删除"
                     fi
                 fi
-                rm -rf "$PANEL_DIR"
-                rm -rf "$WWW_DIR"
-                rm -f "$PREFIX"/etc/nginx/conf.d/zeropanel*.conf
-                rm -f "$HOME/bin/zeropanel"
-                if [ -f "$HOME/.bashrc" ]; then
-                    grep -v 'export PATH="$HOME/bin:$PATH"' "$HOME/.bashrc" > "$HOME/.bashrc.tmp" && mv "$HOME/.bashrc.tmp" "$HOME/.bashrc" || rm -f "$HOME/.bashrc.tmp"
-                fi
-                echo -e "\033[1;37m卸载相关服务 (nginx / mariadb / php-fpm)...\033[0m"
-                pkg uninstall -y nginx mariadb php-fpm 2>&1 | tail -n 3 || true
-                rm -rf "$PREFIX/var/lib/mysql"
+                rm -rf "\$PANEL_DIR"
+                rm -rf "\$WWW_DIR"
+                rm -f /etc/nginx/conf.d/zeropanel*.conf
+                rm -f /usr/local/bin/zeropanel
+                rm -f /etc/apt/sources.list.d/php.sury.org.list
+                echo -e "\033[1;37m卸载相关服务 (nginx / mariadb-server / php-fpm / php-mysql)...\033[0m"
+                DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge nginx mariadb-server php-fpm php-mysql 2>&1 | tail -n 3 || true
+                rm -rf /var/lib/mysql
                 echo -e "\033[0;32mZeroPanel 已完全卸载\033[0m"
-                if [ -n "$data_backup_path" ]; then
-                    echo "  数据备份: $data_backup_path"
-                    echo "  恢复: 重新安装面板后，解压该备份到 $PANEL_DIR/data"
+                if [ -n "\$data_backup_path" ]; then
+                    echo "  数据备份: \$data_backup_path"
+                    echo "  恢复: 重新安装面板后，解压该备份到 \$PANEL_DIR/data"
                 fi
                 ;;
             *)
@@ -585,40 +785,33 @@ case "$1" in
         ;;
 esac
 SCRIPT
-
-    chmod +x "$HOME/bin/zeropanel"
+    chmod +x /usr/local/bin/zeropanel
     print_success "快捷命令创建完成"
-
-    touch "$HOME/.bashrc"
-    if ! grep -q 'export PATH="$HOME/bin:$PATH"' "$HOME/.bashrc"; then
-        echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
-    fi
-    export PATH="$HOME/bin:$PATH"
 
     # 步骤 9: 启动服务
     print_step 9 $total_steps "启动服务"
+    echo -e "  ${CYAN}启动相关服务...${NC}"
+
+    # 启动 MariaDB（优先 systemctl/service，回退直接启动守护进程）
+    if ! pgrep -x mysqld >/dev/null && ! pgrep -x mariadbd >/dev/null; then
+        if command -v mysqld_safe >/dev/null 2>&1; then
+            start_service mysql mysqld_safe
+        elif command -v mysqld >/dev/null 2>&1; then
+            start_service mysql mysqld
+        fi
+        sleep 2
+    fi
+
+    # 启动 Nginx
+    if ! pgrep -x nginx >/dev/null; then
+        start_service nginx nginx
+    fi
+
+    # 启动所有已安装的 PHP-FPM 版本
+    start_php_fpm_all
+
     PY_CMD=$(detect_python_cmd)
-
-    if ! pgrep -x mysqld > /dev/null && ! pgrep -x mariadbd > /dev/null; then
-        echo -e "  ${CYAN}启动 MariaDB...${NC}"
-        if command_exists mysqld_safe; then nohup mysqld_safe > /dev/null 2>&1 &
-        elif command_exists mysqld; then nohup mysqld > /dev/null 2>&1 &
-        else print_warning "未找到 MariaDB 启动命令"; fi
-        sleep 3
-    fi
-
-    if ! pgrep -f php-fpm > /dev/null; then
-        echo -e "  ${CYAN}启动 PHP-FPM...${NC}"
-        php-fpm 2>/dev/null || print_warning "PHP-FPM 启动失败"
-    fi
-
-    if ! pgrep -x nginx > /dev/null; then
-        echo -e "  ${CYAN}启动 Nginx...${NC}"
-        nginx 2>/dev/null || print_warning "Nginx 启动失败"
-    fi
-
-    if [ -n "$PY_CMD" ] && ! pgrep -f "$PY_CMD app.py" > /dev/null; then
-        echo -e "  ${CYAN}启动 ZeroPanel...${NC}"
+    if [ -n "$PY_CMD" ]; then
         cd "$PANEL_DIR"
         nohup "$PY_CMD" app.py > "$DATA_DIR/panel.log" 2>&1 &
         sleep 2
@@ -636,21 +829,21 @@ main() {
     # 卸载模式
     case "$1" in
         --uninstall|uninstall|-u)
-            check_termux_environment
-            uninstall_termux
+            check_linux_environment
+            uninstall_linux
             return
             ;;
     esac
 
-    echo -e "  ${WHITE}欢迎使用 ZeroPanel Termux 轻量版安装程序！${NC}"
+    echo -e "  ${WHITE}欢迎使用 ZeroPanel Linux 版安装程序！${NC}"
     echo ""
 
-    check_termux_environment
+    check_linux_environment
 
-    echo -e "  ${GREEN}检测到 Termux / ZeroTermux 环境${NC}"
+    echo -e "  ${GREEN}检测到 Ubuntu / Debian Linux 环境${NC}"
     echo -e "  ${WHITE}按 Enter 继续...${NC}"
     read -r
-    install_termux
+    install_linux
 
     # 安装完成提示
     echo ""

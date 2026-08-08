@@ -1,16 +1,61 @@
 // ZeroPanel v2.0 - 网站管理逻辑
 
 let websites = [];
+let rewriteTemplates = {};
+let currentDbInfoId = '';
+
+// 伪静态规则模板
+const builtInTemplates = {
+    wordpress: `location / {
+    try_files $uri $uri/ /index.php?$args;
+}`,
+    thinkphp: `location / {
+    if (!-e $request_filename) {
+        rewrite ^(.*)$ /index.php?s=$1 last;
+    }
+}`,
+    laravel: `location / {
+    try_files $uri $uri/ /index.php?$query_string;
+}`,
+    typecho: `location / {
+    index index.php index.html;
+    if (-f $request_filename/index.html) {
+        rewrite (.*) $1/index.html break;
+    }
+    if (-f $request_filename/index.php) {
+        rewrite (.*) $1/index.php;
+    }
+    if (!-f $request_filename) {
+        rewrite (.*) /index.php;
+    }
+}`
+};
 
 // 加载网站列表
 async function loadWebsites() {
     try {
-        const response = await fetch('/api/websites');
-        const data = await response.json();
+        showLoading('加载网站列表...');
+        const data = await apiRequest('/api/websites');
         websites = data.websites || [];
         renderWebsiteList();
     } catch (error) {
         showToast('加载网站列表失败', 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+// 加载伪静态模板
+async function loadRewriteTemplates() {
+    try {
+        const data = await apiRequest('/api/rewrite/templates');
+        if (data.success && data.templates) {
+            rewriteTemplates = { ...builtInTemplates, ...data.templates };
+        } else {
+            rewriteTemplates = builtInTemplates;
+        }
+    } catch (error) {
+        rewriteTemplates = builtInTemplates;
     }
 }
 
@@ -47,18 +92,17 @@ function renderWebsiteList() {
                     ${site.status === 'running' ? '运行中' : '已停止'}
                 </span>
             </td>
-            <td>
-                ${site.db_name ? `
-                    <div class="db-info">
-                        <div>数据库: ${site.db_name}</div>
-                        <div>用户: ${site.db_user}</div>
-                        <div class="db-password">密码: ${site.db_password || '-'}</div>
-                    </div>
-                ` : '-'}
-            </td>
             <td>${site.created_at || '-'}</td>
             <td>
                 <div class="action-btns">
+                    <button class="action-btn" onclick="showDbInfoModal('${site.id}', event)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
+                            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                        </svg>
+                        数据库信息
+                    </button>
                     <button class="action-btn" onclick="startWebsite('${site.id}')">
                         <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
                             <polygon points="5 3 19 12 5 21 5 3"/>
@@ -72,15 +116,6 @@ function renderWebsiteList() {
                         </svg>
                         停止
                     </button>
-                    ${site.db_name ? `
-                    <button class="action-btn" onclick="resetDbPassword('${site.id}')">
-                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
-                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                        </svg>
-                        重置数据库密码
-                    </button>
-                    ` : ''}
                     <button class="action-btn danger" onclick="deleteWebsite('${site.id}')">
                         <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
                             <polyline points="3 6 5 6 21 6"/>
@@ -98,15 +133,30 @@ function renderWebsiteList() {
 function showCreateModal() {
     document.getElementById('create-modal').classList.add('show');
     document.getElementById('domain').value = '';
+    document.getElementById('port').value = '8080';
     document.getElementById('root').value = '';
-    document.getElementById('create-database').checked = false;
-    document.getElementById('db-password').value = '';
-    document.getElementById('db-password-row').style.display = 'none';
+    document.getElementById('php_version').value = '8.0';
+    document.getElementById('create_database').checked = false;
+    document.getElementById('rewrite_template').value = '';
+    document.getElementById('rewrite_rules').value = '';
+    document.getElementById('create-db-group').style.display = 'block';
 }
 
 // 隐藏创建弹窗
 function hideCreateModal() {
     document.getElementById('create-modal').classList.remove('show');
+}
+
+// 应用伪静态模板
+function applyRewriteTemplate(template) {
+    const textarea = document.getElementById('rewrite_rules');
+    if (!template) {
+        return;
+    }
+    const rules = rewriteTemplates[template] || builtInTemplates[template] || '';
+    if (rules) {
+        textarea.value = rules;
+    }
 }
 
 // 创建网站
@@ -117,17 +167,22 @@ document.getElementById('create-form').addEventListener('submit', async (e) => {
     const port = document.getElementById('port').value;
     const root = document.getElementById('root').value;
     const php_version = document.getElementById('php_version').value;
-    const create_database = document.getElementById('create-database').checked;
-    const db_password = document.getElementById('db-password').value;
+    const create_database = document.getElementById('create_database').checked;
+    const rewrite_rules = document.getElementById('rewrite_rules').value;
     
     try {
-        const response = await fetch('/api/websites', {
+        showLoading('正在创建网站...');
+        const data = await apiRequest('/api/websites', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ domain, port: parseInt(port), root, php_version, create_database, db_password })
+            body: JSON.stringify({
+                domain,
+                port: parseInt(port),
+                root,
+                php_version,
+                create_database,
+                rewrite_rules
+            })
         });
-        
-        const data = await response.json();
         
         if (data.success) {
             showToast('网站创建成功', 'success');
@@ -138,14 +193,75 @@ document.getElementById('create-form').addEventListener('submit', async (e) => {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 });
+
+// 显示数据库信息弹窗
+async function showDbInfoModal(id, event) {
+    if (event) event.stopPropagation();
+    currentDbInfoId = id;
+    
+    const list = document.getElementById('db-info-list');
+    list.innerHTML = `
+        <div class="empty-state">
+            <svg class="spinner" viewBox="0 0 24 24" width="32" height="32" stroke="currentColor" stroke-width="2" fill="none">
+                <circle cx="12" cy="12" r="10" stroke-dasharray="50" stroke-dashoffset="20" stroke-linecap="round"/>
+            </svg>
+            <p>加载中...</p>
+        </div>
+    `;
+    document.getElementById('db-info-modal').classList.add('show');
+    
+    try {
+        const data = await apiRequest(`/api/websites/${id}/db`);
+        if (data.success && data.database) {
+            const db = data.database;
+            list.innerHTML = `
+                <div class="info-row">
+                    <span class="info-label">数据库名</span>
+                    <span class="info-value">${db.name || '-'}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">用户名</span>
+                    <span class="info-value">${db.username || '-'}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">密码</span>
+                    <span class="info-value">${db.password || '-'}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">状态</span>
+                    <span class="info-value">${db.exists ? '已创建' : '未创建'}</span>
+                </div>
+            `;
+        } else {
+            list.innerHTML = `
+                <div class="empty-state">
+                    <p>${data.message || '暂无数据库信息'}</p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        list.innerHTML = `
+            <div class="empty-state">
+                <p>加载数据库信息失败</p>
+            </div>
+        `;
+    }
+}
+
+// 隐藏数据库信息弹窗
+function hideDbInfoModal() {
+    document.getElementById('db-info-modal').classList.remove('show');
+}
 
 // 启动网站
 async function startWebsite(id) {
     try {
-        const response = await fetch(`/api/websites/${id}/start`, { method: 'POST' });
-        const data = await response.json();
+        showLoading('正在启动网站...');
+        const data = await apiRequest(`/api/websites/${id}/start`, { method: 'POST' });
         
         if (data.success) {
             showToast('网站已启动', 'success');
@@ -155,14 +271,16 @@ async function startWebsite(id) {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
 // 停止网站
 async function stopWebsite(id) {
     try {
-        const response = await fetch(`/api/websites/${id}/stop`, { method: 'POST' });
-        const data = await response.json();
+        showLoading('正在停止网站...');
+        const data = await apiRequest(`/api/websites/${id}/stop`, { method: 'POST' });
         
         if (data.success) {
             showToast('网站已停止', 'success');
@@ -172,6 +290,8 @@ async function stopWebsite(id) {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
@@ -180,8 +300,8 @@ async function deleteWebsite(id) {
     if (!confirm('确定要删除这个网站吗？')) return;
     
     try {
-        const response = await fetch(`/api/websites/${id}`, { method: 'DELETE' });
-        const data = await response.json();
+        showLoading('正在删除网站...');
+        const data = await apiRequest(`/api/websites/${id}`, { method: 'DELETE' });
         
         if (data.success) {
             showToast('网站已删除', 'success');
@@ -191,36 +311,13 @@ async function deleteWebsite(id) {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
-
-// 重置数据库密码
-async function resetDbPassword(id) {
-    if (!confirm('确定要重置该网站数据库密码吗？')) return;
-
-    try {
-        const response = await fetch(`/api/websites/${id}/db-reset`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
-        });
-
-        const data = await response.json();
-        if (data.success) {
-            showToast(`新密码: ${data.password}`, 'success', 5000);
-            loadWebsites();
-        } else {
-            showToast(data.message, 'error');
-        }
-    } catch (error) {
-        showToast('网络错误', 'error');
-    }
-}
-
-// 切换数据库密码输入框显示
-document.getElementById('create-database').addEventListener('change', function() {
-    document.getElementById('db-password-row').style.display = this.checked ? 'block' : 'none';
-});
 
 // 初始化
-document.addEventListener('DOMContentLoaded', loadWebsites);
+document.addEventListener('DOMContentLoaded', () => {
+    loadWebsites();
+    loadRewriteTemplates();
+});

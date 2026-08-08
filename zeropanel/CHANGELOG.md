@@ -1,11 +1,36 @@
-# ZeroPanel Termux 轻量版更新日志
+# ZeroPanel Linux 版更新日志
+
+## v2.1.0
+
+### 重要变更
+
+- **仓库统一为普通 Linux 版，移除 Termux 版**
+  - 删除原 `zeropanel/`（Termux 轻量版）目录与对应的 `zeropanel_v2.zip` 分发包
+  - 原 `zeropanel-proot/`（Proot 高级版）移植为普通 Linux 版并更名为 `zeropanel/`
+  - 仓库现只保留一个面向 Ubuntu / Debian 等 Linux 服务器的版本，不再区分 Termux / Proot
+
+- **服务管理适配普通 Linux（支持 systemd）**
+  - 新增 systemd 检测：启动 / 停止服务时优先使用 `systemctl`，其次 `service`，最后回退直接启动守护进程
+  - 兼容带 systemd 的常规 Linux 服务器、sysvinit 环境，以及无 systemd 的容器环境
+  - 影响范围：`app.py` 的 `api_start_services`、`api_restart_php_fpm`，以及安装脚本与 `zeropanel` 快捷命令的服务启停逻辑
+
+- **云更新地址与解压路径更新**
+  - 云更新读取 `zeropanel/VERSION` 与 `zeropanel/CHANGELOG.md`，下载包改为 `zeropanel_v2.zip`
+  - 安装脚本与 `_safe_extract_update` 改为处理 `zeropanel/` 顶层目录布局
+
+### 其他
+
+- 移除代码与文档中所有 Termux / Proot / ZeroTermux 相关措辞，统一为「Linux 版」
+- 系统信息中 `os` 默认值由 `Linux (proot)` 改为 `Linux`
+
+---
 
 ## v2.0.24
 
 ### 修复
 
 - **修复面板「运行时间」不刷新的问题**
-  - 运行时间原读取 `/proc/uptime`（系统开机时长），在容器/虚拟环境中面板重启后该值不变化，导致页面一直显示同一时间
+  - 运行时间原读取 `/proc/uptime`（系统开机时长），在 Proot/容器环境中面板重启后该值不变化，导致页面一直显示同一时间
   - 改为统计面板进程自身的启动时长，面板重启后运行时间即时刷新
 
 ---
@@ -15,7 +40,7 @@
 ### 新增功能
 
 - **云更新备份与卸载备份路径统一**
-  - 新增统一备份根目录 `~/.zeropanel_backups`（与面板目录平级），云更新备份存放于 `BACKUP_ROOT/update_backup`，卸载备份存放于 `BACKUP_ROOT/zeropanel_data_<时间戳>.tar.gz`
+  - 新增统一备份根目录 `/var/lib/zeropanel_backups`（与面板目录平级），云更新备份存放于 `BACKUP_ROOT/update_backup`，卸载备份存放于 `BACKUP_ROOT/zeropanel_data_<时间戳>.tar.gz`
   - 面板卸载时新增「是否备份面板数据到统一备份目录」询问，默认备份，可选择不备份直接删除
   - 卸载备份优先使用 tar 打包（单文件、速度快），tar 不可用时回退目录拷贝，备份成功后输出路径与恢复指引
   - 完全卸载确认文案不再承诺"数据将先备份"，改为实际询问备份方式
@@ -24,9 +49,15 @@
 
 ## v2.0.22
 
-### 版本同步
+### 新增功能
 
-- 同步版本号至 2.0.22（安装脚本系统识别与 PHP 多版本源为 Proot 高级版功能，本版无功能变更）
+- **安装脚本自动识别系统并添加 PHP 多版本源 (SURY)**
+  - 安装时自动检测 Debian/Ubuntu 发行版与版本代号（如 bookworm、jammy），为受支持系统自动写入 SURY PHP 源文件
+  - 支持 Debian buster/bullseye/bookworm/trixie/sid 与 Ubuntu focal/jammy/noble，添加源后可安装任意 PHP 版本（7.4~8.4）
+  - 源添加失败或系统不受支持时自动回退，不影响官方源安装，面板仍可正常使用
+  - 启用多版本源时自动预装面板默认使用的 PHP 8.0 及常用扩展（mysql/curl/gd/mbstring/xml/zip/bcmath/opcache/intl）
+  - PHP-FPM 配置与启动循环扩展支持 PHP 8.4
+  - 完全卸载时自动清理 PHP 源文件
 
 ---
 
@@ -42,9 +73,13 @@
 
 ## v2.0.20
 
-### 版本同步
+### 修复
 
-- 同步版本号至 2.0.20（PHP 版本管理为 Proot 高级版功能，本版无功能变更）
+- **修复 PHP 版本安装失败问题**
+  - 不同 Debian/Ubuntu 官方源提供的 PHP 版本不同（如 Debian 12/bookworm 只有 8.2），此前面板固定列出全部版本，安装源中不存在的版本会报「E: 无法定位软件包 php8.0-fpm」
+  - 新增 PHP 版本可用性探测：通过 `apt-cache policy` 检测各版本是否在当前软件源中有候选包，源中不存在的版本在面板中标记「源中不可用」并禁用安装按钮
+  - 安装失败且提示「无法定位软件包 / has no installation candidate」时，自动 `apt-get update` 后重试一次
+  - 探测结果缓存 30 秒，避免频繁请求拖慢 PHP 管理页加载
 
 ---
 
@@ -76,13 +111,8 @@
 
 - **卸载面板支持两种方式**
   - 仅卸载面板程序：删除面板文件，保留网站、数据与相关服务（数据自动移出面板目录，可恢复）
-  - 完全卸载：删除面板、数据、网站、Nginx 站点配置与快捷命令，移除 PATH 配置，并卸载 Nginx/MariaDB/PHP-FPM 服务及 MariaDB 数据目录（数据先自动备份）
+  - 完全卸载：删除面板、数据、网站、Nginx 站点配置与快捷命令，并卸载 Nginx/MariaDB/PHP-FPM 服务及 MariaDB 数据目录（数据先自动备份）
   - 运行 `zeropanel uninstall` 或 `install.sh --uninstall` 后选择卸载方式，均可随时取消
-
-### 问题修复
-
-- **修复完全卸载时 Nginx 站点配置清理不生效**
-  - 原 `rm -f "$PREFIX/etc/nginx/conf.d/zeropanel*.conf"` 中 glob 被引号包裹无法展开，站点配置从未被删除，现已修复
 
 ---
 
@@ -90,9 +120,14 @@
 
 ### 问题修复
 
-- **文件管理默认打开网站根目录 `~/www`**
-  - 文件管理默认打开网站根目录 `~/www`，所有网站的目录直接列在 `~/www` 下，与创建网站时生成的根目录一致
-  - 两个版本行为统一：Proot 版默认打开 `/var/www`，Termux 版默认打开 `~/www`
+- **文件管理默认打开网站根目录 `/var/www`**
+  - 网站根目录由 `/var/www/html` 调整为 `/var/www`，文件管理默认打开该目录，所有网站的目录直接列在 `/var/www` 下
+  - 创建网站时默认根目录同步为 `/var/www/{域名}`，与文件管理默认目录一致
+  - 若已按旧版在 `/var/www/html` 下建站，可在创建网站时手动指定根目录，或将旧目录迁移到 `/var/www` 下
+
+- **安装脚本同步更新**
+  - `install.sh` 的 `WWW_DIR` 由 `/var/www/html` 更新为 `/var/www`
+  - 卸载时删除的网站根目录同步为 `/var/www`
 
 ---
 
@@ -101,7 +136,7 @@
 ### 问题修复
 
 - **文件管理默认打开网站文件目录，不再显示启动目录**
-  - 修复打开文件管理时默认显示面板启动目录（如 `/var/www`）的问题，现在默认进入网站文件目录 `~/www`，与创建网站时生成的根目录一致
+  - 修复打开文件管理时默认显示面板启动目录（如 `/var/www`）的问题，现在默认进入网站文件目录 `/var/www/html`，与创建网站时生成的根目录一致
   - 支持在文件管理中逐级浏览整个文件系统
 
 - **备份文件放安全位置，不再通过文件管理暴露**
@@ -109,7 +144,7 @@
   - 数据库备份恢复、SQL 导入、云更新回滚等内部功能不受影响，仍可正常读取备份
 
 - **面板程序目录保护覆盖实际运行目录**
-  - 面板程序所在目录持续受保护，避免通过文件管理误删面板文件
+  - 除标准安装目录（`/var/lib/zeropanel`）外，额外保护面板实际运行目录，兼容手动解压到任意位置运行的情况，避免通过文件管理误删面板文件
 
 ---
 
@@ -119,9 +154,9 @@
 
 - **文件管理支持整个文件系统**
   - 文件管理不再局限于网站目录与面板数据目录，可浏览和管理根目录下任意文件
-  - 建站文件（`~/www` 下的网站文件）可直接在文件管理中查看、编辑、上传、删除
+  - 建站文件（`/var/www/html` 下的网站文件）可直接在文件管理中查看、编辑、上传、删除
   - 面包屑导航根路径由旧版硬编码的 `~/www` 修正为实际文件系统根 `/`
-  - 面板程序目录（面板安装目录，不含 `data`）仍受保护，避免通过文件管理误删面板文件；备份、上传等数据文件不受影响
+  - 面板程序目录（`/var/lib/zeropanel`，不含 `data`）仍受保护，避免通过文件管理误删面板文件；备份、上传等数据文件不受影响
 
 ---
 
@@ -138,7 +173,7 @@
 
 - **修复云更新时「备份文件为空，面板目录没有可读文件」报错**
   - 面板主目录探测增强：优先选择包含 `app.py` 或 `templates`/`static` 的真实代码目录
-  - 兼容迁移期旧路径（`~/zeropanel` 与 `~/.zeropanel`），避免误选仅含 `data` 的空壳目录
+  - 兼容迁移期旧路径（`/var/lib/zeropanel` 与 `/var/www/zeropanel`），避免误选仅含 `data` 的空壳目录
 
 ---
 
@@ -146,8 +181,9 @@
 
 ### 问题修复
 
-- **同步版本号**
-  - 与 Proot 高级版保持版本号一致
+- **修复 PHP 扩展管理页面扩展名全部显示 undefined 的问题**
+  - 后端 `/api/php/extensions` 接口返回的扩展对象新增 `name` 字段
+  - 前端 `renderExtensions` 使用 `ext.name` 显示扩展名，现在能正确显示
 
 ---
 
@@ -156,8 +192,8 @@
 ### 问题修复
 
 - **修复创建网站后文件管理无法访问网站文件的问题**
-  - 新增 `WEB_ROOT_BASE` 变量，并统一设置为 `WWW_DIR`（`~/www`）
-  - 确保创建网站时生成的网站目录与文件管理器允许访问的根目录一致
+  - 将 `WEB_ROOT_BASE` 从 `/var/www` 调整为 `/var/www/html`，与 `WWW_DIR` 保持一致
+  - 创建网站时生成的网站目录位于 `/var/www/html/{domain}`，文件管理器可直接访问
 
 ---
 
@@ -175,11 +211,11 @@
 
 ### 重要变更
 
-- **面板程序目录改为隐藏目录**
-  - Termux 轻量版面板程序目录从 `~/zeropanel` 迁移到 `~/.zeropanel`
-  - 网站目录保持 `~/www` 不变
-  - 避免在文件管理器中直接看到面板程序文件（`app.py`、`static`、`templates` 等），降低误删风险
-  - 数据目录为 `~/.zeropanel/data`，仍可通过文件管理访问
+- **面板程序目录迁移到更安全的位置**
+  - Proot 高级版面板程序目录从 `/var/www/zeropanel` 迁移到 `/var/lib/zeropanel`
+  - 网站目录保持 `/var/www/html` 不变
+  - 文件管理器的允许范围限定为 `/var/www/html` 和 `/var/lib/zeropanel/data`
+  - 避免在文件管理器中直接看到并误删面板程序文件（`app.py`、`static`、`templates` 等）
 
 ---
 
@@ -188,22 +224,34 @@
 ### 重要变更
 
 - **独立版本体系**
-  - Termux 轻量版与 Proot 高级版开始使用独立的版本号和更新日志
-  - 云更新将读取 `zeropanel/VERSION` 和 `zeropanel/CHANGELOG.md`
+  - Proot 高级版与 Termux 轻量版开始使用独立的版本号和更新日志
+  - 云更新将读取 `zeropanel-proot/VERSION` 和 `zeropanel-proot/CHANGELOG.md`
   - 两个版本可以独立演进，互不影响
+
+- **Proot 量身定制**
+  - `zeropanel-proot/app.py` 移除所有 Termux 兼容分支和检测逻辑
+  - 固定 Proot (Ubuntu/Debian) 路径：`/var/www/zeropanel`、`/var/www/html`、`/etc/nginx/conf.d` 等
+  - `zeropanel-proot/install.sh` 现在只处理 Proot 环境，环境校验失败时明确提示应使用 Termux 版
+
+### 新增功能
+
+- **无 systemd 服务管理**
+  - 针对 Proot 容器没有 systemd 的特点，直接使用原生守护进程启动服务
+  - MariaDB: `mysqld_safe` 直接启动
+  - Nginx: `nginx` 直接启动，`nginx -s reload` 重载配置
+  - PHP-FPM: `php{ver}-fpm` 直接启动
+  - 服务状态统一使用 `pgrep` 检测，不再依赖 `service` / `systemctl`
+
+- **PHP 多版本独立 socket**
+  - 每个 PHP 版本使用独立的 unix socket
+  - 例如：`/run/php/php7.4-fpm.sock`、`/run/php/php8.0-fpm.sock`
+  - 网站配置自动绑定对应版本的 socket
 
 ### 问题修复
 
 - **云更新解压路径兼容**
   - 修复 `_safe_extract_update` 对 zip 包根目录前缀的识别
-  - 同时支持 `zeropanel/` 和 `zeropanel-proot/` 两种根目录布局
-
-### 优化
-
-- **安装脚本独立化**
-  - `zeropanel/install.sh` 现在只处理 Termux / ZeroTermux 环境
-  - 移除 Proot 相关分支，脚本更精简
-  - 环境校验失败时明确提示应使用 Proot 版安装脚本
+  - 同时支持 `zeropanel-proot/` 和 `zeropanel/` 两种根目录布局
 
 ---
 
@@ -273,7 +321,7 @@
 
 - **版本与更新地址**
   - 版本号统一升级为 `2.0.3`
-  - 修正 Termux 普通版与 Proot 高级版各自的云更新分发包地址
+  - 修正 Proot 高级版与 Termux 普通版各自的云更新分发包地址
   - 修正 GitHub raw 内容地址格式，避免 404 错误
 
 ---
@@ -282,19 +330,14 @@
 
 ### 新增功能
 
-- **Termux 普通版文件管理升级**
-  - 新增文件在线解压：支持 zip、tar.gz、tar.bz2、tar.xz、tar
-  - 新增文件在线压缩：支持 zip、tar.gz
-  - 保留并完善在线编辑文本文件
-
-- **Termux 普通版数据库管理升级**
-  - 创建网站时可勾选同时创建独立数据库
-  - 自动创建与网站同名的数据库和用户
-  - 删除网站时同步删除对应数据库
-  - 新增重置网站数据库密码功能
-
-- **安装脚本**
-  - Termux 安装时自动安装 zip 依赖
+- **Proot 高级版上线**
+  - 支持 Proot 容器内的 Ubuntu / Debian 环境
+  - 支持多 PHP 版本管理
+  - 支持 PHP 扩展在线安装
+  - 支持网站伪静态规则
+  - 支持文件在线解压、压缩、编辑
+  - 支持网站独立数据库
+  - 支持定时任务（crontab）
 
 ---
 

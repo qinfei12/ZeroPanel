@@ -2,12 +2,16 @@
 
 let currentPath = '';
 let currentEditFile = '';
+let selectedFiles = new Set();
+
+const textExtensions = ['txt', 'html', 'css', 'js', 'php', 'py', 'json', 'md', 'conf', 'log', 'ini', 'yml', 'yaml', 'xml', 'sh', 'sql', 'nginx'];
+const compressExtensions = ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'rar', '7z'];
 
 // 加载文件列表
 async function loadFiles(path = '') {
     try {
-        const response = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
-        const data = await response.json();
+        showLoading('加载文件列表...');
+        const data = await apiRequest(`/api/files?path=${encodeURIComponent(path)}`);
         
         if (!data.success && data.message) {
             showToast(data.message, 'error');
@@ -15,10 +19,14 @@ async function loadFiles(path = '') {
         }
         
         currentPath = data.path;
+        selectedFiles.clear();
+        updateSelectionActions();
         renderBreadcrumb(data.path, data.parent);
         renderFileList(data.files);
     } catch (error) {
         showToast('加载文件列表失败', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
@@ -41,6 +49,18 @@ function renderBreadcrumb(path, parent) {
     breadcrumb.innerHTML = html;
 }
 
+// 判断是否为文本文件
+function isTextFile(name) {
+    const ext = name.split('.').pop().toLowerCase();
+    return textExtensions.includes(ext);
+}
+
+// 判断是否为压缩文件
+function isArchiveFile(name) {
+    const ext = name.split('.').pop().toLowerCase();
+    return compressExtensions.includes(ext);
+}
+
 // 渲染文件列表
 function renderFileList(files) {
     const fileList = document.getElementById('file-list');
@@ -57,54 +77,62 @@ function renderFileList(files) {
         return;
     }
     
-    fileList.innerHTML = files.map(file => `
-        <div class="file-item ${file.type}" onclick="${file.type === 'directory' ? `navigateTo('${currentPath}/${file.name}')` : ''}">
-            <div class="file-icon ${file.type === 'directory' ? 'folder' : ''}">
-                ${file.type === 'directory' 
-                    ? '<svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
-                    : '<svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
-                }
+    fileList.innerHTML = files.map((file, index) => {
+        const fullPath = `${currentPath}/${file.name}`;
+        const isDir = file.type === 'directory';
+        const safeName = file.name.replace(/'/g, "\\'");
+        const safePath = fullPath.replace(/'/g, "\\'");
+        
+        return `
+        <div class="file-item ${file.type} ${selectedFiles.has(fullPath) ? 'selected' : ''}" data-path="${safePath}">
+            <label class="file-checkbox-label" onclick="event.stopPropagation()">
+                <input type="checkbox" class="file-checkbox" 
+                    ${selectedFiles.has(fullPath) ? 'checked' : ''}
+                    onchange="toggleFileSelection('${safePath}', this.checked)">
+            </label>
+            <div class="file-icon-wrapper" onclick="${isDir ? `navigateTo('${safePath}')` : 'void(0)'}">
+                <div class="file-icon ${isDir ? 'folder' : ''}">
+                    ${isDir 
+                        ? '<svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+                        : '<svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
+                    }
+                </div>
             </div>
             <div class="file-name">${file.name}</div>
-            <div class="file-meta">${file.type === 'file' ? formatSize(file.size) : ''}</div>
-            <div class="action-btns" style="margin-top: 8px;">
-                ${file.type === 'file' ? `
-                    <button class="action-btn" onclick="editFile('${currentPath}/${file.name}')">
+            <div class="file-meta">${!isDir ? formatSize(file.size) : ''}</div>
+            <div class="action-btns" style="margin-top: 8px;" onclick="event.stopPropagation()">
+                ${!isDir && isTextFile(file.name) ? `
+                    <button class="action-btn" onclick="editFile('${safePath}')">
                         <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none">
                             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                             <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                         </svg>
                     </button>
-                    <button class="action-btn" onclick="downloadFile('${currentPath}/${file.name}')">
+                ` : ''}
+                ${!isDir && isArchiveFile(file.name) ? `
+                    <button class="action-btn" onclick="extractFile('${safePath}')">
                         <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                             <polyline points="7 10 12 15 17 10"/>
                             <line x1="12" y1="15" x2="12" y2="3"/>
                         </svg>
                     </button>
-                    ${isArchiveFile(file.name) ? `
-                    <button class="action-btn" onclick="showExtractModal('${currentPath}/${file.name}')">
+                ` : ''}
+                ${!isDir ? `
+                    <button class="action-btn" onclick="downloadFile('${safePath}')">
                         <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="17 8 12 3 7 8"/>
-                            <line x1="12" y1="3" x2="12" y2="15"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
                         </svg>
                     </button>
-                    ` : ''}
                 ` : ''}
-                <button class="action-btn" onclick="showRenameModal('${currentPath}/${file.name}', '${file.name}')">
+                <button class="action-btn" onclick="showRenameModal('${safePath}', '${safeName}')">
                     <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none">
                         <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
                     </svg>
                 </button>
-                <button class="action-btn" onclick="compressItem('${currentPath}/${file.name}', '${file.name}')">
-                    <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                        <polyline points="17 8 12 3 7 8"/>
-                        <line x1="12" y1="3" x2="12" y2="15"/>
-                    </svg>
-                </button>
-                <button class="action-btn danger" onclick="deleteFile('${currentPath}/${file.name}')">
+                <button class="action-btn danger" onclick="deleteFile('${safePath}')">
                     <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none">
                         <polyline points="3 6 5 6 21 6"/>
                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -112,7 +140,36 @@ function renderFileList(files) {
                 </button>
             </div>
         </div>
-    `).join('');
+    `}).join('');
+}
+
+// 切换文件选择
+function toggleFileSelection(path, checked) {
+    if (checked) {
+        selectedFiles.add(path);
+    } else {
+        selectedFiles.delete(path);
+    }
+    updateSelectionActions();
+    renderFileListHighlight();
+}
+
+// 更新列表选中高亮
+function renderFileListHighlight() {
+    document.querySelectorAll('.file-item').forEach(item => {
+        const path = item.dataset.path;
+        item.classList.toggle('selected', selectedFiles.has(path));
+    });
+}
+
+// 更新选择相关按钮状态
+function updateSelectionActions() {
+    const extractBtn = document.getElementById('extract-btn');
+    const compressBtn = document.getElementById('compress-btn');
+    const hasSelection = selectedFiles.size > 0;
+    
+    if (extractBtn) extractBtn.disabled = !hasSelection;
+    if (compressBtn) compressBtn.disabled = !hasSelection;
 }
 
 // 导航到指定目录
@@ -138,13 +195,11 @@ document.getElementById('mkdir-form').addEventListener('submit', async (e) => {
     const name = document.getElementById('dir-name').value;
     
     try {
-        const response = await fetch('/api/files/mkdir', {
+        showLoading('创建目录...');
+        const data = await apiRequest('/api/files/mkdir', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: currentPath, name })
         });
-        
-        const data = await response.json();
         
         if (data.success) {
             showToast('目录创建成功', 'success');
@@ -155,6 +210,8 @@ document.getElementById('mkdir-form').addEventListener('submit', async (e) => {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 });
 
@@ -172,15 +229,13 @@ async function uploadFile(input) {
     formData.append('file', file);
     formData.append('path', currentPath);
     
-    showToast('正在上传...', 'warning');
+    showLoading('上传文件中...');
     
     try {
-        const response = await fetch('/api/files/upload', {
+        const data = await apiRequest('/api/files/upload', {
             method: 'POST',
             body: formData
         });
-        
-        const data = await response.json();
         
         if (data.success) {
             showToast('上传成功', 'success');
@@ -190,6 +245,8 @@ async function uploadFile(input) {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
     
     input.value = '';
@@ -214,13 +271,11 @@ document.getElementById('rename-form').addEventListener('submit', async (e) => {
     const newName = document.getElementById('new-name').value;
     
     try {
-        const response = await fetch('/api/files/rename', {
+        showLoading('重命名中...');
+        const data = await apiRequest('/api/files/rename', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ old_path: currentEditFile, new_name: newName })
         });
-        
-        const data = await response.json();
         
         if (data.success) {
             showToast('重命名成功', 'success');
@@ -231,6 +286,8 @@ document.getElementById('rename-form').addEventListener('submit', async (e) => {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 });
 
@@ -239,13 +296,11 @@ async function deleteFile(path) {
     if (!confirm('确定要删除吗？')) return;
     
     try {
-        const response = await fetch('/api/files/delete', {
+        showLoading('删除中...');
+        const data = await apiRequest('/api/files/delete', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path })
         });
-        
-        const data = await response.json();
         
         if (data.success) {
             showToast('删除成功', 'success');
@@ -255,6 +310,8 @@ async function deleteFile(path) {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
@@ -268,8 +325,8 @@ async function editFile(path) {
     currentEditFile = path;
     
     try {
-        const response = await fetch(`/api/files/read?path=${encodeURIComponent(path)}`);
-        const data = await response.json();
+        showLoading('读取文件...');
+        const data = await apiRequest(`/api/files/read?path=${encodeURIComponent(path)}`);
         
         if (data.success) {
             document.getElementById('edit-file-name').textContent = path.split('/').pop();
@@ -280,6 +337,8 @@ async function editFile(path) {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
@@ -293,13 +352,11 @@ async function saveFile() {
     const content = document.getElementById('file-content').value;
     
     try {
-        const response = await fetch('/api/files/write', {
+        showLoading('保存文件...');
+        const data = await apiRequest('/api/files/write', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: currentEditFile, content })
         });
-        
-        const data = await response.json();
         
         if (data.success) {
             showToast('保存成功', 'success');
@@ -309,74 +366,110 @@ async function saveFile() {
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
-// 判断是否为压缩文件
-function isArchiveFile(filename) {
-    const archives = ['.zip', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz', '.tar'];
-    const lower = filename.toLowerCase();
-    return archives.some(ext => lower.endsWith(ext));
-}
-
-// 显示解压弹窗
-function showExtractModal(path) {
-    currentEditFile = path;
-    document.getElementById('extract-modal').classList.add('show');
-    document.getElementById('extract-dest').value = currentPath;
-}
-
-// 隐藏解压弹窗
-function hideExtractModal() {
-    document.getElementById('extract-modal').classList.remove('show');
-}
-
-// 解压文件
-document.getElementById('extract-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const dest = document.getElementById('extract-dest').value;
-
+// 解压选中的压缩文件
+async function extractSelected() {
+    const archives = Array.from(selectedFiles).filter(isArchiveFile);
+    if (archives.length === 0) {
+        showToast('请先选择至少一个压缩文件', 'warning');
+        return;
+    }
+    
     try {
-        const response = await fetch('/api/files/extract', {
+        showLoading('解压中...');
+        const data = await apiRequest('/api/files/extract', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: currentEditFile, dest })
+            body: JSON.stringify({ path: currentPath, files: archives })
         });
-
-        const data = await response.json();
+        
         if (data.success) {
             showToast('解压成功', 'success');
-            hideExtractModal();
-            loadFiles(dest || currentPath);
-        } else {
-            showToast(data.message, 'error');
-        }
-    } catch (error) {
-        showToast('网络错误', 'error');
-    }
-});
-
-// 压缩文件/目录
-async function compressItem(path, name) {
-    const dest = currentPath + '/' + name + '.zip';
-    if (!confirm(`确定要压缩 ${name} 为 ${name}.zip 吗？`)) return;
-
-    try {
-        const response = await fetch('/api/files/compress', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paths: [path], dest, format: 'zip' })
-        });
-
-        const data = await response.json();
-        if (data.success) {
-            showToast('压缩成功', 'success');
             loadFiles(currentPath);
         } else {
             showToast(data.message, 'error');
         }
     } catch (error) {
         showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+// 解压单个文件
+async function extractFile(path) {
+    try {
+        showLoading('解压中...');
+        const data = await apiRequest('/api/files/extract', {
+            method: 'POST',
+            body: JSON.stringify({ path: currentPath, files: [path] })
+        });
+        
+        if (data.success) {
+            showToast('解压成功', 'success');
+            loadFiles(currentPath);
+        } else {
+            showToast(data.message, 'error');
+        }
+    } catch (error) {
+        showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+// 显示压缩弹窗
+function showCompressModal() {
+    if (selectedFiles.size === 0) {
+        showToast('请先选择要压缩的文件/目录', 'warning');
+        return;
+    }
+    document.getElementById('compress-modal').classList.add('show');
+    document.getElementById('compress-name').value = '';
+    document.getElementById('compress-format').value = 'zip';
+}
+
+// 隐藏压缩弹窗
+function hideCompressModal() {
+    document.getElementById('compress-modal').classList.remove('show');
+}
+
+// 压缩文件
+async function compressFiles() {
+    const name = document.getElementById('compress-name').value.trim();
+    const format = document.getElementById('compress-format').value;
+    
+    if (!name) {
+        showToast('请输入压缩包名称', 'warning');
+        return;
+    }
+    
+    try {
+        showLoading('压缩中...');
+        const data = await apiRequest('/api/files/compress', {
+            method: 'POST',
+            body: JSON.stringify({
+                path: currentPath,
+                files: Array.from(selectedFiles),
+                name,
+                format
+            })
+        });
+        
+        if (data.success) {
+            showToast('压缩成功', 'success');
+            hideCompressModal();
+            loadFiles(currentPath);
+        } else {
+            showToast(data.message, 'error');
+        }
+    } catch (error) {
+        showToast('网络错误', 'error');
+    } finally {
+        hideLoading();
     }
 }
 

@@ -1,6 +1,6 @@
 #!/bin/bash
-# ZeroPanel v2.0 统一安装入口
-# 自动检测环境并调用对应版本的安装脚本
+# ZeroPanel v2.0 - Linux (Ubuntu/Debian) 版安装入口
+# 下载并执行面板专用安装脚本
 
 set -e
 
@@ -18,7 +18,7 @@ print_separator() {
 print_title() {
     print_separator
     echo -e "                    ${WHITE}ZeroPanel v2.0${NC}"
-    echo -e "                ${CYAN}智能环境安装入口${NC}"
+    echo -e "                ${CYAN}Linux (Ubuntu/Debian) 版${NC}"
     print_separator
 }
 
@@ -31,12 +31,7 @@ detect_environment() {
     fi
 
     if [ "$distro" = "debian" ] || [ "$distro" = "ubuntu" ]; then
-        echo "proot"
-        return
-    fi
-
-    if [ -n "$TERMUX_VERSION" ] || [ -n "$PREFIX" ] && [[ "$PREFIX" == *"com.termux"* ]] || [ -d "/data/data/com.termux" ]; then
-        echo "termux"
+        echo "linux"
         return
     fi
 
@@ -51,25 +46,9 @@ main() {
     env_type=$(detect_environment)
 
     case "$env_type" in
-        proot)
-            echo -e "  ${GREEN}检测到 Proot (Ubuntu/Debian) 环境${NC}"
-            echo -e "  ${WHITE}将下载并执行 Proot 高级版安装脚本${NC}"
-            echo ""
-
-            local tmp_script
-            tmp_script=$(mktemp)
-            if curl -fsSL -o "$tmp_script" "https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel-proot/install.sh"; then
-                chmod +x "$tmp_script"
-                bash "$tmp_script" "$@"
-                rm -f "$tmp_script"
-            else
-                echo -e "  ${RED}下载 Proot 版安装脚本失败，请检查网络${NC}"
-                exit 1
-            fi
-            ;;
-        termux)
-            echo -e "  ${GREEN}检测到 Termux / ZeroTermux 环境${NC}"
-            echo -e "  ${WHITE}将下载并执行 Termux 轻量版安装脚本${NC}"
+        linux)
+            echo -e "  ${GREEN}检测到 Ubuntu / Debian Linux 环境${NC}"
+            echo -e "  ${WHITE}将下载并执行 Linux 版安装脚本${NC}"
             echo ""
 
             local tmp_script
@@ -79,7 +58,7 @@ main() {
                 bash "$tmp_script" "$@"
                 rm -f "$tmp_script"
             else
-                echo -e "  ${RED}下载 Termux 版安装脚本失败，请检查网络${NC}"
+                echo -e "  ${RED}下载安装脚本失败，请检查网络${NC}"
                 exit 1
             fi
             ;;
@@ -87,12 +66,10 @@ main() {
             echo -e "  ${RED}错误：当前环境不受支持${NC}"
             echo ""
             echo -e "  ${WHITE}ZeroPanel 支持以下环境：${NC}"
-            echo -e "    ${CYAN}1. ZeroTermux / Termux${NC}（Android 终端模拟器）"
-            echo -e "    ${CYAN}2. Proot 容器内的 Ubuntu / Debian${NC}"
+            echo -e "    ${CYAN}Ubuntu / Debian 等 Linux 服务器${NC}"
             echo ""
-            echo -e "  ${YELLOW}请根据环境选择对应版本：${NC}"
-            echo -e "    ${CYAN}Termux:${NC}  bash <(curl -fsSL https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/install.sh)"
-            echo -e "    ${CYAN}Proot:${NC}   bash <(curl -fsSL https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel-proot/install.sh)"
+            echo -e "  ${YELLOW}请使用对应命令安装：${NC}"
+            echo -e "    ${CYAN}Linux:${NC}  bash <(curl -fsSL https://raw.githubusercontent.com/2136206076/ZeroPanel/main/install.sh)"
             echo ""
             exit 1
             ;;

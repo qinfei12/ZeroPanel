@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ZeroPanel v2.0 - 轻量级建站面板
-专为 ZeroTermux 设计
+面向 Linux (Ubuntu/Debian) 服务器环境
 """
 
 import os
@@ -13,12 +13,12 @@ import time
 import uuid
 import shutil
 import hashlib
-import secrets
-import string
 import subprocess
 import sqlite3
 import zipfile
 import tempfile
+import secrets
+import string
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -31,36 +31,42 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
+CORS(app)
 
+# 配置（固定为 Linux Ubuntu/Debian 路径）
 # 面板启动时间（模块加载时记录，用于计算面板运行时长）
 PANEL_START_TIME = time.time()
-# 配置（根据环境自动检测）
-BASE_DIR = Path(__file__).parent.resolve()
+# 面板程序目录放在 /var/lib/zeropanel，避免通过文件管理误删
+BASE_DIR = Path('/var/lib/zeropanel')
 DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'panel.db'
 BACKUP_DIR = DATA_DIR / 'backups'
 # 统一备份根目录：云更新备份与卸载备份共用（与面板目录平级，卸载不影响）
-BACKUP_ROOT = Path.home() / '.zeropanel_backups'
+BACKUP_ROOT = Path('/var/lib/zeropanel_backups')
 # 云更新备份目录（统一备份根目录下）
 UPDATE_BACKUP_DIR = BACKUP_ROOT / 'update_backup'
+UPLOAD_DIR = DATA_DIR / 'uploads'
+# 网站根目录：文件管理默认打开目录与创建网站根目录均以此为基准
+WWW_DIR = Path('/var/www')
 
 # 面板版本信息：从本地 VERSION 文件读取
 try:
     PANEL_VERSION = (BASE_DIR / 'VERSION').read_text(encoding='utf-8').strip()
 except Exception:
-    PANEL_VERSION = '2.0.8'
+    PANEL_VERSION = '2.1.0'
 
-# 云更新配置：读取 Termux 版独立的版本号和更新说明
+# 云更新配置：读取版本号和更新说明
 UPDATE_CONFIG = {
     'version_url': 'https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/VERSION',
     'download_url': 'https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel_v2.zip',
     'release_notes_url': 'https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/CHANGELOG.md'
 }
-UPLOAD_DIR = DATA_DIR / 'uploads'
-WWW_DIR = Path.home() / 'www'
-# 网站根目录基准：与 WWW_DIR 保持一致
+
+NGINX_CONF_DIR = Path('/etc/nginx/conf.d')
+PHP_FPM_DIR = Path('/etc/php')
+# 网站根目录基准：与 WWW_DIR 保持一致，确保文件管理器能访问网站文件
 WEB_ROOT_BASE = WWW_DIR
-NGINX_CONF_DIR = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr')) / 'etc' / 'nginx' / 'conf.d'
+NGINX_LOG_DIR = Path('/var/log/nginx')
 
 # 允许的文件扩展名
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'tar', 'gz', 'sql', 'php', 'html', 'css', 'js', 'json', 'xml', 'md'}
@@ -68,7 +74,17 @@ ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'zip', 'tar', '
 # 允许文件操作的根目录：整个文件系统，便于管理建站文件等任意目录
 # 但面板程序目录受保护，避免误删面板文件；备份数据目录对文件管理隐藏
 ALLOWED_ROOTS = [Path('/')]
-PROTECTED_DIRS = [BASE_DIR]
+# 保护面板程序目录：标准安装目录 + 实际运行目录（兼容手动解压运行）
+PROTECTED_DIRS = [BASE_DIR, Path(__file__).parent.resolve()]
+
+# 常用 PHP 扩展列表
+COMMON_PHP_EXTENSIONS = [
+    'redis', 'mysqli', 'pdo_mysql', 'gd', 'curl', 'mbstring',
+    'xml', 'zip', 'bcmath', 'opcache', 'intl', 'fileinfo', 'exif'
+]
+
+# 支持的 PHP 版本
+SUPPORTED_PHP_VERSIONS = ['7.4', '8.0', '8.1', '8.2', '8.3']
 
 
 def resolve_allowed_path(path, allow_data=False):
@@ -154,6 +170,7 @@ def init_db():
             php_version TEXT DEFAULT '8.0',
             status TEXT DEFAULT 'stopped',
             port INTEGER DEFAULT 8080,
+            rewrite_rules TEXT DEFAULT '',
             db_name TEXT DEFAULT '',
             db_user TEXT DEFAULT '',
             db_password TEXT DEFAULT '',
@@ -171,6 +188,8 @@ def init_db():
             cursor.execute("ALTER TABLE websites ADD COLUMN php_version TEXT DEFAULT '8.0'")
         if 'status' not in columns:
             cursor.execute("ALTER TABLE websites ADD COLUMN status TEXT DEFAULT 'stopped'")
+        if 'rewrite_rules' not in columns:
+            cursor.execute("ALTER TABLE websites ADD COLUMN rewrite_rules TEXT DEFAULT ''")
         if 'db_name' not in columns:
             cursor.execute("ALTER TABLE websites ADD COLUMN db_name TEXT DEFAULT ''")
         if 'db_user' not in columns:
@@ -223,24 +242,176 @@ def login_required(f):
 
 # ==================== 工具函数 ====================
 
-def run_command(cmd, shell=False):
+def run_command(cmd, shell=False, timeout=30):
     """安全执行命令"""
     try:
         if shell:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         else:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
         return False, '', '命令执行超时'
     except Exception as e:
         return False, '', str(e)
 
+
+def _php_fpm_socket(php_version='8.0'):
+    """返回 PHP-FPM socket 路径"""
+    return f'/run/php/php{php_version}-fpm.sock'
+
+
+def _nginx_log_dir():
+    """返回 Nginx 日志目录"""
+    return Path('/var/log/nginx')
+
+
+def _php_fpm_service_name(php_version='8.0'):
+    """返回 PHP-FPM 服务名"""
+    major, minor = php_version.split('.')
+    return f'php{major}{minor}-fpm'
+
+
+# systemd 可用性检测缓存（init 进程为 systemd 即视为可用）
+_have_systemd_cache = None
+
+
+def _have_systemd():
+    """检测当前系统是否使用 systemd 管理 services（部分容器环境没有）"""
+    global _have_systemd_cache
+    if _have_systemd_cache is not None:
+        return _have_systemd_cache
+    _have_systemd_cache = (
+        Path('/run/systemd/system').exists()
+        or os.path.islink('/sbin/init') and 'systemd' in os.readlink('/sbin/init')
+    )
+    return _have_systemd_cache
+
+
+def _start_service(service_name, daemon_cmd=None):
+    """启动系统服务：优先 systemctl，其次 service，最后直接启动守护进程。
+
+    返回 (success, stderr)。
+    """
+    if _have_systemd():
+        success, _, stderr = run_command(['systemctl', 'start', service_name], timeout=30)
+        if success:
+            return True, ''
+    # service 命令（sysvinit）
+    success, _, stderr = run_command(['service', service_name, 'start'], timeout=30)
+    if success:
+        return True, ''
+    # 直接启动守护进程（无 systemd / 无 service 的容器环境）
+    if daemon_cmd:
+        try:
+            subprocess.Popen(
+                daemon_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            return True, ''
+        except Exception as e:
+            return False, str(e)
+    return False, stderr or f'启动服务 {service_name} 失败'
+
+
+def _stop_service(service_name, pkill_pattern=None):
+    """停止系统服务：优先 systemctl，其次 service，最后 pkill 守护进程。"""
+    if _have_systemd():
+        success, _, _ = run_command(['systemctl', 'stop', service_name], timeout=30)
+        if success:
+            return True
+    success, _, _ = run_command(['service', service_name, 'stop'], timeout=30)
+    if success:
+        return True
+    if pkill_pattern:
+        run_command(['pkill', '-f', pkill_pattern])
+    return True
+
+
+
+def _is_package_installed(package):
+    """检查 Debian/Ubuntu 软件包是否已安装"""
+    success, _, _ = run_command(['dpkg', '-l', package])
+    if not success:
+        # dpkg -l 对未安装包返回非零，再用 dpkg-query 确认
+        success, stdout, _ = run_command(['dpkg-query', '-W', '-f=${Status}', package])
+        if success and 'install ok installed' in stdout:
+            return True
+        return False
+    return True
+
+
+def _is_php_fpm_running(php_version='8.0'):
+    """检查指定版本的 PHP-FPM 是否正在运行"""
+    service = _php_fpm_service_name(php_version)
+    success, _, _ = run_command(['pgrep', '-f', service])
+    if success:
+        return True
+    success, _, _ = run_command(['pgrep', '-f', f'php-fpm.*{php_version}'])
+    return success
+
+
+# PHP 版本可用性探测结果缓存（30 秒），避免每次请求都执行 apt-cache
+_php_availability_cache = {'ts': 0, 'data': {}}
+_PHP_AVAILABILITY_CACHE_TTL = 30
+
+
+def _php_version_available(php_version='8.0'):
+    """检查指定 PHP 版本在当前 apt 源中是否有候选包
+
+    Debian/Ubuntu 不同版本官方源提供的 PHP 版本不同，例如：
+    Debian 12 (bookworm) 只有 8.2，Debian 11 (bullseye) 只有 7.4。
+    对源中不存在的版本执行 apt-get install 会报「无法定位软件包」。
+    """
+    now = time.time()
+    if now - _php_availability_cache['ts'] < _PHP_AVAILABILITY_CACHE_TTL:
+        return _php_availability_cache['data'].get(php_version, False)
+
+    cache_data = {}
+    for ver in SUPPORTED_PHP_VERSIONS:
+        cache_data[ver] = _check_php_candidate(ver)
+    _php_availability_cache['ts'] = now
+    _php_availability_cache['data'] = cache_data
+    return cache_data.get(php_version, False)
+
+
+def _check_php_candidate(php_version):
+    """通过 apt-cache policy 判断 php{ver}-fpm 是否有安装候选"""
+    success, stdout, _ = run_command(['apt-cache', 'policy', f'php{php_version}-fpm'])
+    if not success:
+        return False
+    for line in stdout.splitlines():
+        if line.strip().startswith('Candidate:'):
+            cand = line.split(':', 1)[1].strip()
+            return bool(cand) and cand != '(none)'
+    return False
+
+
+def _detect_installed_php_versions():
+    """通过 /etc/php/{ver}/fpm 目录检测已安装的 PHP 版本"""
+    installed = []
+    if not PHP_FPM_DIR.exists():
+        return installed
+    for ver in SUPPORTED_PHP_VERSIONS:
+        fpm_dir = PHP_FPM_DIR / ver / 'fpm'
+        if fpm_dir.exists() and fpm_dir.is_dir():
+            installed.append(ver)
+    return installed
+
+
+def _random_password(length=16):
+    """生成随机密码"""
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
 def get_system_info():
     """获取系统信息"""
     info = {
         'hostname': 'localhost',
-        'os': 'Android/Termux',
+        'os': 'Linux',
         'kernel': 'Linux',
         'uptime': '0',
         'cpu_model': 'Unknown',
@@ -297,6 +468,16 @@ def get_system_info():
         hours = int((uptime_seconds % 86400) // 3600)
         minutes = int((uptime_seconds % 3600) // 60)
         info['uptime'] = f'{days}天 {hours}小时 {minutes}分钟'
+        
+        # 识别系统类型
+        try:
+            os_release = Path('/etc/os-release').read_text()
+            for line in os_release.splitlines():
+                if line.startswith('PRETTY_NAME='):
+                    info['os'] = line.split('=', 1)[1].strip('"')
+                    break
+        except Exception:
+            info['os'] = 'Linux'
     except Exception:
         pass
     
@@ -317,7 +498,7 @@ def get_system_stats():
     
     try:
         # CPU 使用率：采样两次 /proc/stat，计算间隔内的使用率
-        # 优先读取总 cpu 行，部分 Android 内核只有 cpu0/cpu1... 等单核行，需要累加
+        # 优先读取总 cpu 行，部分内核只有 cpu0/cpu1... 等单核行，需要累加
         def read_cpu_times():
             total = 0
             idle = 0
@@ -503,10 +684,10 @@ def get_nginx_disabled_path(domain, port=8080):
     return NGINX_CONF_DIR / f'{safe_domain}_{port}.conf.disabled'
 
 
-def generate_nginx_config(domain, root_path, php_version='8.0', port=8080):
+def generate_nginx_config(domain, root_path, php_version='8.0', port=8080, rewrite_rules=''):
     """生成 Nginx 配置"""
-    # 使用统一的 PHP-FPM socket，由 install.sh 配置
-    php_sock = '/data/data/com.termux/files/usr/var/run/php-fpm.sock'
+    php_sock = _php_fpm_socket(php_version)
+    log_dir = _nginx_log_dir()
 
     config_lines = [
         'server {',
@@ -520,6 +701,15 @@ def generate_nginx_config(domain, root_path, php_version='8.0', port=8080):
         '        try_files $uri $uri/ /index.php?$query_string;',
         '    }',
         '',
+    ]
+
+    # 插入自定义伪静态规则
+    if rewrite_rules and rewrite_rules.strip():
+        for line in rewrite_rules.strip().splitlines():
+            config_lines.append('    ' + line)
+        config_lines.append('')
+
+    config_lines.extend([
         '    location ~ \\.php$ {',
         '        fastcgi_pass unix:' + php_sock + ';',
         '        fastcgi_index index.php;',
@@ -531,13 +721,68 @@ def generate_nginx_config(domain, root_path, php_version='8.0', port=8080):
         '        deny all;',
         '    }',
         '',
-        '    access_log /data/data/com.termux/files/usr/var/log/nginx/' + domain + '.access.log;',
-        '    error_log /data/data/com.termux/files/usr/var/log/nginx/' + domain + '.error.log;',
+        '    access_log ' + str(log_dir / (domain + '.access.log')) + ';',
+        '    error_log ' + str(log_dir / (domain + '.error.log')) + ';',
         '}',
         ''
-    ]
+    ])
 
     return '\n'.join(config_lines)
+
+
+# ==================== 数据库站点辅助函数 ====================
+
+def _create_website_database(website_id, domain):
+    """为网站创建独立数据库和用户，返回 (db_name, db_user, db_password)"""
+    safe_domain = re.sub(r'[^a-zA-Z0-9_]', '_', domain).strip('_')[:30]
+    if not safe_domain:
+        safe_domain = 'site'
+    short_id = re.sub(r'[^a-zA-Z0-9]', '', website_id)[:8]
+    db_name = f'site_{safe_domain}_{short_id}'
+    db_user = f'user_{safe_domain}_{short_id}'
+    db_password = _random_password(16)
+
+    # 使用 mariadb_query 创建数据库和用户
+    success, _, stderr = mariadb_query(f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4")
+    if not success:
+        raise RuntimeError(f'创建数据库失败: {stderr}')
+
+    success, _, stderr = mariadb_query(
+        f"CREATE USER IF NOT EXISTS '{db_user}'@'localhost' IDENTIFIED BY '{db_password}'"
+    )
+    if not success:
+        raise RuntimeError(f'创建数据库用户失败: {stderr}')
+
+    success, _, stderr = mariadb_query(f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'localhost'")
+    if not success:
+        raise RuntimeError(f'授权数据库失败: {stderr}')
+
+    mariadb_query('FLUSH PRIVILEGES')
+    return db_name, db_user, db_password
+
+
+def _delete_website_database(db_name, db_user):
+    """删除网站对应的数据库和用户"""
+    if db_name and re.match(r'^[a-zA-Z0-9_]+$', db_name):
+        mariadb_query(f"DROP DATABASE IF EXISTS `{db_name}`")
+    if db_user and re.match(r'^[a-zA-Z0-9_]+$', db_user):
+        mariadb_query(f"DROP USER IF EXISTS '{db_user}'@'localhost'")
+    mariadb_query('FLUSH PRIVILEGES')
+
+
+def _reset_website_database_password(db_user):
+    """重置网站数据库用户密码"""
+    if not db_user or not re.match(r'^[a-zA-Z0-9_]+$', db_user):
+        raise RuntimeError('非法的数据库用户名')
+    new_password = _random_password(16)
+    success, _, stderr = mariadb_query(
+        f"ALTER USER '{db_user}'@'localhost' IDENTIFIED BY '{new_password}'"
+    )
+    if not success:
+        raise RuntimeError(f'重置密码失败: {stderr}')
+    mariadb_query('FLUSH PRIVILEGES')
+    return new_password
+
 
 # ==================== 路由：页面 ====================
 
@@ -583,6 +828,18 @@ def monitor():
 def settings():
     """账号设置"""
     return render_template('settings.html')
+
+@app.route('/php')
+@login_required
+def php_page():
+    """PHP 版本与扩展管理"""
+    return render_template('php.html')
+
+@app.route('/cron')
+@login_required
+def cron_page():
+    """定时任务管理"""
+    return render_template('cron.html')
 
 # ==================== API：认证 ====================
 
@@ -667,7 +924,10 @@ def api_list_websites():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('SELECT id, domain, root_path, php_version, status, port, db_name, db_user, db_password, created_at FROM websites ORDER BY created_at DESC')
+        cursor.execute(
+            'SELECT id, domain, root_path, php_version, status, port, rewrite_rules, '
+            'db_name, db_user, db_password, created_at FROM websites ORDER BY created_at DESC'
+        )
         rows = cursor.fetchall()
         conn.close()
 
@@ -680,10 +940,11 @@ def api_list_websites():
                 'php_version': row[3],
                 'status': row[4],
                 'port': row[5],
-                'db_name': row[6],
-                'db_user': row[7],
-                'db_password': row[8],
-                'created_at': row[9]
+                'rewrite_rules': row[6] or '',
+                'db_name': row[7] or '',
+                'db_user': row[8] or '',
+                'db_password': row[9] or '',
+                'created_at': row[10]
             })
 
         return jsonify({'websites': websites})
@@ -699,8 +960,8 @@ def api_create_website():
     port = data.get('port', 8080)
     root = data.get('root', '').strip()
     php_version = data.get('php_version', '8.0')
-    create_db = data.get('create_database', False)
-    db_password_input = data.get('db_password', '').strip()
+    rewrite_rules = data.get('rewrite_rules', '')
+    create_database = data.get('create_database', False)
     
     if not domain:
         return jsonify({'success': False, 'message': '域名不能为空'})
@@ -733,7 +994,7 @@ def api_create_website():
 
     # 设置默认根目录
     if not root:
-        root = str(WWW_DIR / safe_domain)
+        root = str(WEB_ROOT_BASE / safe_domain)
 
     # 创建网站目录
     root_path = Path(root)
@@ -753,7 +1014,7 @@ def api_create_website():
         return jsonify({'success': False, 'message': '创建目录失败: ' + str(e)})
 
     # 生成 Nginx 配置
-    config_content = generate_nginx_config(domain, root, php_version, port)
+    config_content = generate_nginx_config(domain, root, php_version, port, rewrite_rules)
     config_file = get_nginx_config_path(domain, port)
 
     try:
@@ -762,30 +1023,26 @@ def api_create_website():
     except Exception as e:
         return jsonify({'success': False, 'message': '创建配置失败: ' + str(e)})
 
-    # 可选：创建网站独立数据库
+    # 保存到数据库
+    website_id = str(uuid.uuid4())
     db_name = ''
     db_user = ''
     db_password = ''
-    if create_db:
-        safe_domain = re.sub(r'[^a-zA-Z0-9_]', '_', domain)[:32].strip('_')
-        if not safe_domain:
-            safe_domain = 'site_' + str(int(time.time()))
-        db_name = safe_domain
-        db_user = safe_domain
-        db_password = db_password_input if db_password_input else _random_password()
 
-        db_success, db_error = _create_website_database(db_name, db_user, db_password)
-        if not db_success:
-            return jsonify({'success': False, 'message': db_error})
+    if create_database:
+        try:
+            db_name, db_user, db_password = _create_website_database(website_id, domain)
+        except Exception as e:
+            return jsonify({'success': False, 'message': '创建数据库失败: ' + str(e)})
 
-    # 保存到数据库
-    website_id = str(uuid.uuid4())
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
         cursor.execute(
-            'INSERT INTO websites (id, domain, root_path, php_version, status, port, db_name, db_user, db_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (website_id, domain, root, php_version, 'running', port, db_name, db_user, db_password)
+            'INSERT INTO websites (id, domain, root_path, php_version, status, port, rewrite_rules, '
+            'db_name, db_user, db_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (website_id, domain, root, php_version, 'running', port, rewrite_rules,
+             db_name, db_user, db_password)
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -802,15 +1059,28 @@ def api_create_website():
     except Exception:
         pass
 
-    return jsonify({'success': True, 'message': '网站创建成功', 'id': website_id})
+    result = {'success': True, 'message': '网站创建成功', 'id': website_id}
+    if db_name:
+        result['database'] = {
+            'db_name': db_name,
+            'db_user': db_user,
+            'db_password': db_password
+        }
+    return jsonify(result)
 
 @app.route('/api/websites/<website_id>', methods=['DELETE'])
 @login_required
 def api_delete_website(website_id):
     """删除网站"""
+    data = request.get_json(silent=True) or {}
+    delete_database = data.get('delete_database', False)
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT domain, root_path, port, db_name, db_user FROM websites WHERE id = ?', (website_id,))
+    cursor.execute(
+        'SELECT domain, root_path, port, db_name, db_user FROM websites WHERE id = ?',
+        (website_id,)
+    )
     row = cursor.fetchone()
 
     if not row:
@@ -832,9 +1102,12 @@ def api_delete_website(website_id):
     if old_config_file.exists():
         old_config_file.unlink()
 
-    # 删除网站独立数据库
-    if db_name:
-        _delete_website_database(db_name, db_user)
+    # 可选删除数据库
+    if delete_database and db_name:
+        try:
+            _delete_website_database(db_name, db_user)
+        except Exception:
+            pass
 
     # 从数据库删除
     cursor.execute('DELETE FROM websites WHERE id = ?', (website_id,))
@@ -855,14 +1128,17 @@ def api_start_website(website_id):
     """启动网站"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT domain, root_path, php_version, port FROM websites WHERE id = ?', (website_id,))
+    cursor.execute(
+        'SELECT domain, root_path, php_version, port, rewrite_rules FROM websites WHERE id = ?',
+        (website_id,)
+    )
     row = cursor.fetchone()
 
     if not row:
         conn.close()
         return jsonify({'success': False, 'message': '网站不存在'})
 
-    domain, root_path, php_version, port = row
+    domain, root_path, php_version, port, rewrite_rules = row
 
     config_file = get_nginx_config_path(domain, port)
     disabled_file = get_nginx_disabled_path(domain, port)
@@ -873,7 +1149,7 @@ def api_start_website(website_id):
             disabled_file.rename(config_file)
         else:
             # 配置文件不存在，重新生成
-            config_content = generate_nginx_config(domain, root_path, php_version, port)
+            config_content = generate_nginx_config(domain, root_path, php_version, port, rewrite_rules or '')
             try:
                 NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
                 config_file.write_text(config_content)
@@ -953,45 +1229,180 @@ def api_restart_website(website_id):
     return api_start_website(website_id)
 
 
-@app.route('/api/websites/<website_id>/db-reset', methods=['POST'])
+@app.route('/api/websites/<website_id>', methods=['PUT'])
 @login_required
-def api_reset_website_db_password(website_id):
-    """重置网站数据库密码"""
-    data = request.get_json(silent=True) or {}
-    new_password = data.get('password', '').strip()
-    if not new_password:
-        new_password = _random_password()
+def api_update_website(website_id):
+    """编辑网站（目前支持修改伪静态规则）"""
+    data = request.get_json()
+    rewrite_rules = data.get('rewrite_rules')
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT db_name, db_user FROM websites WHERE id = ?', (website_id,))
+    cursor.execute(
+        'SELECT domain, root_path, php_version, port, rewrite_rules FROM websites WHERE id = ?',
+        (website_id,)
+    )
     row = cursor.fetchone()
-
-    if not row or not row[0]:
+    if not row:
         conn.close()
-        return jsonify({'success': False, 'message': '该网站没有独立数据库'})
+        return jsonify({'success': False, 'message': '网站不存在'})
 
-    db_name, db_user = row
+    domain, root_path, php_version, port, current_rules = row
 
-    # 更新 MySQL 用户密码
-    safe_user = quote_string(db_user)
-    safe_pwd = quote_string(new_password)
-    success, _, stderr = mariadb_query(f"ALTER USER {safe_user}@'localhost' IDENTIFIED BY {safe_pwd}")
-    if not success:
-        # 老版本 MariaDB 不支持 ALTER USER，尝试 SET PASSWORD
-        success, _, stderr = mariadb_query(f"SET PASSWORD FOR {safe_user}@'localhost' = PASSWORD({safe_pwd})")
-    mariadb_query('FLUSH PRIVILEGES')
+    if rewrite_rules is not None and rewrite_rules != current_rules:
+        cursor.execute(
+            'UPDATE websites SET rewrite_rules = ? WHERE id = ?',
+            (rewrite_rules, website_id)
+        )
+        conn.commit()
 
-    if not success:
-        conn.close()
-        return jsonify({'success': False, 'message': f'重置密码失败: {stderr}'})
+        # 重新生成配置文件
+        config_file = get_nginx_config_path(domain, port)
+        if config_file.exists():
+            config_content = generate_nginx_config(domain, root_path, php_version, port, rewrite_rules)
+            try:
+                config_file.write_text(config_content)
+                run_command(['nginx', '-s', 'reload'])
+            except Exception as e:
+                conn.close()
+                return jsonify({'success': False, 'message': '更新配置失败: ' + str(e)})
 
-    # 更新本地记录
-    cursor.execute('UPDATE websites SET db_password = ? WHERE id = ?', (new_password, website_id))
-    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'message': '网站已更新'})
+
+
+@app.route('/api/websites/<website_id>/db', methods=['GET'])
+@login_required
+def api_get_website_db(website_id):
+    """获取网站独立数据库信息"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT domain, db_name, db_user, db_password FROM websites WHERE id = ?',
+        (website_id,)
+    )
+    row = cursor.fetchone()
     conn.close()
 
-    return jsonify({'success': True, 'message': '数据库密码已重置', 'password': new_password})
+    if not row:
+        return jsonify({'success': False, 'message': '网站不存在'})
+
+    domain, db_name, db_user, db_password = row
+    return jsonify({
+        'success': True,
+        'domain': domain,
+        'db_name': db_name or '',
+        'db_user': db_user or '',
+        'db_password': db_password or ''
+    })
+
+
+@app.route('/api/websites/<website_id>/db', methods=['POST'])
+@login_required
+def api_manage_website_db(website_id):
+    """管理网站独立数据库"""
+    data = request.get_json()
+    action = data.get('action', '')
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT domain, db_name, db_user, db_password FROM websites WHERE id = ?',
+        (website_id,)
+    )
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify({'success': False, 'message': '网站不存在'})
+
+    domain, db_name, db_user, db_password = row
+
+    if action == 'create':
+        if db_name:
+            conn.close()
+            return jsonify({'success': False, 'message': '数据库已存在'})
+        try:
+            new_db_name, new_db_user, new_db_password = _create_website_database(website_id, domain)
+        except Exception as e:
+            conn.close()
+            return jsonify({'success': False, 'message': str(e)})
+        cursor.execute(
+            'UPDATE websites SET db_name = ?, db_user = ?, db_password = ? WHERE id = ?',
+            (new_db_name, new_db_user, new_db_password, website_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({
+            'success': True,
+            'message': '数据库创建成功',
+            'database': {
+                'db_name': new_db_name,
+                'db_user': new_db_user,
+                'db_password': new_db_password
+            }
+        })
+
+    elif action == 'delete':
+        if db_name:
+            try:
+                _delete_website_database(db_name, db_user)
+            except Exception as e:
+                conn.close()
+                return jsonify({'success': False, 'message': f'删除数据库失败: {str(e)}'})
+        cursor.execute(
+            'UPDATE websites SET db_name = ?, db_user = ?, db_password = ? WHERE id = ?',
+            ('', '', '', website_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': '数据库已删除'})
+
+    elif action == 'reset_password':
+        if not db_user:
+            conn.close()
+            return jsonify({'success': False, 'message': '数据库用户不存在'})
+        try:
+            new_password = _reset_website_database_password(db_user)
+        except Exception as e:
+            conn.close()
+            return jsonify({'success': False, 'message': str(e)})
+        cursor.execute(
+            'UPDATE websites SET db_password = ? WHERE id = ?',
+            (new_password, website_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({
+            'success': True,
+            'message': '密码已重置',
+            'db_password': new_password
+        })
+
+    conn.close()
+    return jsonify({'success': False, 'message': '未知的操作类型'})
+
+
+@app.route('/api/rewrite/templates')
+@login_required
+def api_rewrite_templates():
+    """返回常见伪静态模板"""
+    templates = {
+        'WordPress': 'try_files $uri $uri/ /index.php?$args;',
+        'ThinkPHP': (
+            'if (!-e $request_filename) {\n'
+            '    rewrite ^(.*)$ /index.php?s=$1 last;\n'
+            '    break;\n'
+            '}'
+        ),
+        'Laravel': 'try_files $uri $uri/ /index.php?$query_string;',
+        'Typecho': (
+            'if (!-e $request_filename) {\n'
+            '    rewrite ^(.*)$ /index.php$1 last;\n'
+            '}'
+        )
+    }
+    return jsonify({'success': True, 'templates': templates})
 
 
 # ==================== 数据库工具函数 ====================
@@ -1129,54 +1540,6 @@ def quote_identifier(name):
 def quote_string(value):
     """安全地转义 SQL 字符串字面量。"""
     return "'" + value.replace("'", "''").replace("\\", "\\\\") + "'"
-
-
-def _random_password(length=16):
-    """生成随机密码"""
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-
-def _create_website_database(db_name, db_user, db_password):
-    """为网站创建数据库和用户，返回 (success, error)"""
-    try:
-        name_quoted = quote_identifier(db_name)
-    except ValueError:
-        return False, '数据库名包含非法字符'
-
-    # 创建数据库
-    success, _, stderr = mariadb_query(f'CREATE DATABASE IF NOT EXISTS {name_quoted} CHARACTER SET utf8mb4')
-    if not success:
-        return False, f'创建数据库失败: {stderr}'
-
-    # 创建用户并授权
-    if db_user and db_password:
-        if not re.match(r'^[a-zA-Z0-9_]+$', db_user):
-            return False, '数据库用户名只能包含字母、数字和下划线'
-        safe_user = quote_string(db_user)
-        safe_pwd = quote_string(db_password)
-        mariadb_query(f"CREATE USER IF NOT EXISTS {safe_user}@'localhost' IDENTIFIED BY {safe_pwd}")
-        mariadb_query(f"GRANT ALL PRIVILEGES ON {name_quoted}.* TO {safe_user}@'localhost'")
-        mariadb_query('FLUSH PRIVILEGES')
-
-    return True, ''
-
-
-def _delete_website_database(db_name, db_user):
-    """删除网站对应的数据库和用户"""
-    if not db_name:
-        return True, ''
-    try:
-        name_quoted = quote_identifier(db_name)
-    except ValueError:
-        return False, '数据库名包含非法字符'
-
-    mariadb_query(f'DROP DATABASE IF EXISTS {name_quoted}')
-    if db_user:
-        safe_user = quote_string(db_user)
-        mariadb_query(f"DROP USER IF EXISTS {safe_user}@'localhost'")
-        mariadb_query('FLUSH PRIVILEGES')
-    return True, ''
 
 
 # ==================== API：数据库管理 ====================
@@ -1436,6 +1799,162 @@ def api_import_database():
     return jsonify({'success': True, 'message': '数据库已成功导入'})
 
 
+# ==================== API：PHP 版本与扩展管理 ====================
+
+@app.route('/api/php/versions')
+@login_required
+def api_php_versions():
+    """返回系统已安装和可安装的 PHP 版本列表"""
+    installed_versions = _detect_installed_php_versions()
+    versions = []
+    for ver in SUPPORTED_PHP_VERSIONS:
+        installed = ver in installed_versions
+        versions.append({
+            'version': ver,
+            'installed': installed,
+            'available': _php_version_available(ver),
+            'fpm_running': _is_php_fpm_running(ver) if installed else False
+        })
+    return jsonify({'success': True, 'versions': versions})
+
+
+@app.route('/api/php/versions', methods=['POST'])
+@login_required
+def api_manage_php_version():
+    """安装或卸载 PHP 版本"""
+    data = request.get_json()
+    version = data.get('version', '').strip()
+    action = data.get('action', '')
+
+    if version not in SUPPORTED_PHP_VERSIONS:
+        return jsonify({'success': False, 'message': '不支持的 PHP 版本'})
+
+    if action not in ('install', 'uninstall'):
+        return jsonify({'success': False, 'message': '操作类型错误'})
+
+    packages = [
+        f'php{version}-fpm',
+        f'php{version}-mysql',
+        f'php{version}-curl',
+        f'php{version}-gd',
+        f'php{version}-mbstring',
+        f'php{version}-xml',
+        f'php{version}-zip',
+        f'php{version}-bcmath',
+        f'php{version}-opcache',
+        f'php{version}-intl',
+    ]
+
+    if action == 'install':
+        success, stdout, stderr = run_command(['apt-get', 'install', '-y'] + packages, timeout=600)
+        if not success and ('无法定位软件包' in stderr or 'has no installation candidate' in stderr):
+            # 软件源索引可能过期，先更新源再重试一次
+            run_command(['apt-get', 'update'], timeout=600)
+            success, stdout, stderr = run_command(['apt-get', 'install', '-y'] + packages, timeout=600)
+    else:
+        success, stdout, stderr = run_command(['apt-get', 'remove', '--purge', '-y'] + packages, timeout=600)
+
+    if not success:
+        if not _php_version_available(version):
+            return jsonify({'success': False, 'message': f'PHP {version} {action} 失败: 当前系统软件源中没有 PHP {version} 的软件包，请使用源中可用的版本'})
+        return jsonify({'success': False, 'message': f'PHP {version} {action} 失败: {stderr or stdout}'})
+
+    return jsonify({'success': True, 'message': f'PHP {version} {"安装" if action == "install" else "卸载"}成功'})
+
+
+@app.route('/api/php/extensions')
+@login_required
+def api_php_extensions():
+    """列出某 PHP 版本的已安装/可安装扩展"""
+    version = request.args.get('version', '8.0')
+    if version not in SUPPORTED_PHP_VERSIONS:
+        return jsonify({'success': False, 'message': '不支持的 PHP 版本'})
+
+    extensions = []
+    success, stdout, _ = run_command([f'php{version}', '-m'])
+    installed_modules = set()
+    if success and stdout:
+        installed_modules = {line.strip().lower() for line in stdout.splitlines() if line.strip()}
+
+    for ext in COMMON_PHP_EXTENSIONS:
+        installed = ext.lower() in installed_modules
+        extensions.append({
+            'name': ext,
+            'extension': ext,
+            'installed': installed,
+            'package': f'php{version}-{ext}'
+        })
+
+    return jsonify({'success': True, 'extensions': extensions})
+
+
+@app.route('/api/php/extensions', methods=['POST'])
+@login_required
+def api_manage_php_extension():
+    """安装或卸载 PHP 扩展"""
+    data = request.get_json()
+    version = data.get('version', '').strip()
+    extension = data.get('extension', '').strip().lower()
+    action = data.get('action', '')
+
+    if version not in SUPPORTED_PHP_VERSIONS:
+        return jsonify({'success': False, 'message': '不支持的 PHP 版本'})
+
+    if not extension or extension not in [e.lower() for e in COMMON_PHP_EXTENSIONS]:
+        return jsonify({'success': False, 'message': '不支持的扩展'})
+
+    if action not in ('install', 'uninstall'):
+        return jsonify({'success': False, 'message': '操作类型错误'})
+
+    package = f'php{version}-{extension}'
+    if action == 'install':
+        success, stdout, stderr = run_command(['apt-get', 'install', '-y', package], timeout=300)
+    else:
+        success, stdout, stderr = run_command(['apt-get', 'remove', '--purge', '-y', package], timeout=300)
+
+    if not success:
+        return jsonify({'success': False, 'message': f'{package} {action} 失败: {stderr or stdout}'})
+
+    return jsonify({'success': True, 'message': f'{package} {"安装" if action == "install" else "卸载"}成功'})
+
+
+@app.route('/api/php/fpm/restart', methods=['POST'])
+@login_required
+def api_restart_php_fpm():
+    """重启指定 PHP-FPM（优先 systemctl/service，回退 pkill + 手动启动）"""
+    data = request.get_json() or {}
+    version = data.get('version', '8.0')
+
+    if version not in SUPPORTED_PHP_VERSIONS:
+        return jsonify({'success': False, 'message': '不支持的 PHP 版本'})
+
+    service = _php_fpm_service_name(version)
+    # 停止该版本 PHP-FPM
+    _stop_service(service, pkill_pattern=service)
+    run_command(['pkill', '-f', f'php-fpm.*{version}'])
+
+    # 启动该版本 PHP-FPM
+    if _have_systemd():
+        success, _, stderr = run_command(['systemctl', 'start', service], timeout=30)
+        if success:
+            return jsonify({'success': True, 'message': f'PHP {version} FPM 已重启'})
+    success, _, stderr = run_command(['service', service, 'start'], timeout=30)
+    if not success:
+        # 直接启动守护进程（后台模式，不添加 -F）
+        success, _, stderr = run_command([service], timeout=10)
+        if not success:
+            # 部分系统命令名为 php-fpm{version}
+            success, _, stderr = run_command([f'php-fpm{version}'], timeout=10)
+
+    if success:
+        return jsonify({'success': True, 'message': f'PHP {version} FPM 已重启'})
+
+    return jsonify({
+        'success': False,
+        'message': f'重启 PHP {version} FPM 失败: {stderr}'
+    })
+
+
 # ==================== API：文件管理 ====================
 
 @app.route('/api/files')
@@ -1626,7 +2145,7 @@ def api_read_file():
 @app.route('/api/files/write', methods=['POST'])
 @login_required
 def api_write_file():
-    """写入文件内容"""
+    """写入文件内容，支持大文件分块写入"""
     data = request.get_json()
     path = data.get('path', '')
     content = data.get('content', '')
@@ -1636,7 +2155,15 @@ def api_write_file():
         return jsonify({'success': False, 'message': '非法路径'})
 
     try:
-        filepath.write_text(content, encoding='utf-8')
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        content_bytes = content.encode('utf-8')
+        chunk_size = 1024 * 1024  # 1MB
+        if len(content_bytes) > chunk_size:
+            with open(filepath, 'wb') as f:
+                for i in range(0, len(content_bytes), chunk_size):
+                    f.write(content_bytes[i:i + chunk_size])
+        else:
+            filepath.write_text(content, encoding='utf-8')
     except Exception as e:
         return jsonify({'success': False, 'message': f'保存失败: {str(e)}'})
 
@@ -1648,52 +2175,58 @@ def api_write_file():
 def api_extract_file():
     """解压文件"""
     data = request.get_json()
-    path = data.get('path', '')
-    dest = data.get('dest', '')
+    path = data.get('path', '').strip()
+    dest = data.get('dest', '').strip()
 
-    if not path:
-        return jsonify({'success': False, 'message': '请选择要解压的文件'})
+    if not path or not dest:
+        return jsonify({'success': False, 'message': '路径和目标目录不能为空'})
 
-    safe_path, allowed = resolve_allowed_path(path)
-    if not allowed or safe_path is None:
-        return jsonify({'success': False, 'message': '文件路径非法'})
+    src_path, src_allowed = resolve_allowed_path(path)
+    dest_path, dest_allowed = resolve_allowed_path(dest)
 
-    if not safe_path.exists() or not safe_path.is_file():
-        return jsonify({'success': False, 'message': '文件不存在'})
+    if not src_allowed or src_path is None or not src_path.exists():
+        return jsonify({'success': False, 'message': '压缩文件不存在或路径非法'})
+    if not dest_allowed or dest_path is None:
+        return jsonify({'success': False, 'message': '目标目录路径非法'})
 
-    if dest:
-        safe_dest, allowed_dest = resolve_allowed_path(dest)
-    else:
-        safe_dest, allowed_dest = resolve_allowed_path(str(safe_path.parent))
+    dest_path.mkdir(parents=True, exist_ok=True)
+    lower_name = src_path.name.lower()
 
-    if not allowed_dest or safe_dest is None:
-        return jsonify({'success': False, 'message': '目标路径非法'})
+    try:
+        if lower_name.endswith('.zip'):
+            success, stdout, stderr = run_command(
+                ['unzip', '-o', str(src_path), '-d', str(dest_path)],
+                timeout=300
+            )
+        elif lower_name.endswith('.tar.gz') or lower_name.endswith('.tgz'):
+            success, stdout, stderr = run_command(
+                ['tar', '-xzf', str(src_path), '-C', str(dest_path)],
+                timeout=300
+            )
+        elif lower_name.endswith('.tar.bz2') or lower_name.endswith('.tbz2'):
+            success, stdout, stderr = run_command(
+                ['tar', '-xjf', str(src_path), '-C', str(dest_path)],
+                timeout=300
+            )
+        elif lower_name.endswith('.tar.xz') or lower_name.endswith('.txz'):
+            success, stdout, stderr = run_command(
+                ['tar', '-xJf', str(src_path), '-C', str(dest_path)],
+                timeout=300
+            )
+        elif lower_name.endswith('.tar'):
+            success, stdout, stderr = run_command(
+                ['tar', '-xf', str(src_path), '-C', str(dest_path)],
+                timeout=300
+            )
+        else:
+            return jsonify({'success': False, 'message': '不支持的压缩格式'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'解压失败: {str(e)}'})
 
-    filename = safe_path.name.lower()
-    commands = {
-        '.zip': ['unzip', '-q', str(safe_path), '-d', str(safe_dest)],
-        '.tar.gz': ['tar', 'zxf', str(safe_path), '-C', str(safe_dest)],
-        '.tgz': ['tar', 'zxf', str(safe_path), '-C', str(safe_dest)],
-        '.tar.bz2': ['tar', 'jxf', str(safe_path), '-C', str(safe_dest)],
-        '.tbz2': ['tar', 'jxf', str(safe_path), '-C', str(safe_dest)],
-        '.tar.xz': ['tar', 'Jxf', str(safe_path), '-C', str(safe_dest)],
-        '.txz': ['tar', 'Jxf', str(safe_path), '-C', str(safe_dest)],
-        '.tar': ['tar', 'xf', str(safe_path), '-C', str(safe_dest)]
-    }
+    if not success:
+        return jsonify({'success': False, 'message': f'解压失败: {stderr or stdout}'})
 
-    matched_cmd = None
-    for ext, cmd in commands.items():
-        if filename.endswith(ext):
-            matched_cmd = cmd
-            break
-
-    if matched_cmd is None:
-        return jsonify({'success': False, 'message': '不支持的压缩格式'})
-
-    success, stdout, stderr = run_command(matched_cmd, timeout=120)
-    if success:
-        return jsonify({'success': True, 'message': '解压成功'})
-    return jsonify({'success': False, 'message': f'解压失败: {stderr}'})
+    return jsonify({'success': True, 'message': '解压成功', 'dest': str(dest_path)})
 
 
 @app.route('/api/files/compress', methods=['POST'])
@@ -1702,48 +2235,216 @@ def api_compress_file():
     """压缩文件/目录"""
     data = request.get_json()
     paths = data.get('paths', [])
-    dest = data.get('dest', '')
-    archive_format = data.get('format', 'zip')
+    name = data.get('name', '').strip()
+    fmt = data.get('format', 'zip')
 
     if not paths:
         return jsonify({'success': False, 'message': '请选择要压缩的文件'})
+    if not name:
+        return jsonify({'success': False, 'message': '压缩文件名不能为空'})
+    if fmt not in ('zip', 'tar.gz'):
+        return jsonify({'success': False, 'message': '仅支持 zip 和 tar.gz 格式'})
 
-    allowed_paths = []
+    # 校验所有源路径
+    resolved_paths = []
     for p in paths:
-        safe_p, allowed = resolve_allowed_path(p)
-        if not allowed or safe_p is None or not safe_p.exists():
+        resolved, allowed = resolve_allowed_path(p)
+        if not allowed or resolved is None or not resolved.exists():
             return jsonify({'success': False, 'message': f'路径非法或不存在: {p}'})
-        allowed_paths.append(safe_p)
+        resolved_paths.append(resolved)
 
-    if not dest:
-        return jsonify({'success': False, 'message': '请指定压缩文件名'})
+    # 压缩包保存到第一个源路径的父目录
+    output_dir = resolved_paths[0].parent
+    output_file = output_dir / name
+    output_file_resolved, allowed = resolve_allowed_path(output_file)
+    if not allowed or output_file_resolved is None:
+        return jsonify({'success': False, 'message': '压缩包保存路径非法'})
 
-    safe_dest, allowed = resolve_allowed_path(dest)
-    if not allowed or safe_dest is None:
-        return jsonify({'success': False, 'message': '压缩文件路径非法'})
-
-    base_dir = allowed_paths[0].parent
-    names = [p.name for p in allowed_paths]
+    # 文件名安全处理
+    safe_name = secure_filename(name)
+    if not safe_name:
+        return jsonify({'success': False, 'message': '压缩文件名不合法'})
+    output_file = output_dir / safe_name
 
     try:
-        if archive_format == 'zip':
-            if not str(safe_dest).lower().endswith('.zip'):
-                safe_dest = safe_dest.with_name(safe_dest.name + '.zip')
-            cmd = ['zip', '-r', str(safe_dest)] + names
-            success, stdout, stderr = run_command(cmd, timeout=120)
-        elif archive_format in ('tar.gz', 'tgz'):
-            if not str(safe_dest).lower().endswith('.tar.gz'):
-                safe_dest = safe_dest.with_name(safe_dest.name + '.tar.gz')
-            cmd = ['tar', 'zcf', str(safe_dest)] + names
-            success, stdout, stderr = run_command(cmd, timeout=120)
+        if fmt == 'zip':
+            if not name.lower().endswith('.zip'):
+                output_file = output_dir / (safe_name + '.zip')
+            cmd = ['zip', '-r', str(output_file)] + [str(p) for p in resolved_paths]
+            success, stdout, stderr = run_command(cmd, timeout=300)
         else:
-            return jsonify({'success': False, 'message': '不支持的压缩格式'})
-
-        if success:
-            return jsonify({'success': True, 'message': '压缩成功'})
-        return jsonify({'success': False, 'message': f'压缩失败: {stderr}'})
+            if not name.lower().endswith('.tar.gz'):
+                output_file = output_dir / (safe_name + '.tar.gz')
+            cmd = ['tar', '-czf', str(output_file), '-C', str(output_dir)]
+            relative_paths = [str(p.relative_to(output_dir)) for p in resolved_paths]
+            cmd.extend(relative_paths)
+            success, stdout, stderr = run_command(cmd, timeout=300)
     except Exception as e:
-        return jsonify({'success': False, 'message': f'操作失败: {str(e)}'})
+        return jsonify({'success': False, 'message': f'压缩失败: {str(e)}'})
+
+    if not success:
+        return jsonify({'success': False, 'message': f'压缩失败: {stderr or stdout}'})
+
+    return jsonify({'success': True, 'message': '压缩成功', 'file': str(output_file)})
+
+
+# ==================== API：定时任务 ====================
+
+def _cron_id(name, schedule, command):
+    """根据任务内容生成稳定 ID"""
+    return hashlib.md5(f'{name}|{schedule}|{command}'.encode()).hexdigest()[:12]
+
+
+def _parse_crontab():
+    """解析当前用户的 crontab，返回任务列表"""
+    tasks = []
+    success, stdout, _ = run_command(['crontab', '-l'])
+    if not success:
+        return tasks
+
+    lines = stdout.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        marker = '# ZeroPanel:'
+        if line.startswith(marker):
+            name = line[len(marker):].strip()
+            i += 1
+            if i >= len(lines):
+                break
+            task_line = lines[i]
+            enabled = not task_line.strip().startswith('#')
+            # 去除可能的前导注释
+            clean_line = task_line.strip()
+            if clean_line.startswith('#'):
+                clean_line = clean_line[1:].strip()
+            parts = clean_line.split(None, 5)
+            if len(parts) >= 6:
+                schedule = ' '.join(parts[:5])
+                command = parts[5]
+                task_id = _cron_id(name, schedule, command)
+                tasks.append({
+                    'id': task_id,
+                    'name': name,
+                    'schedule': schedule,
+                    'command': command,
+                    'enabled': enabled
+                })
+        i += 1
+    return tasks
+
+
+def _write_crontab(tasks):
+    """将任务列表写回 crontab"""
+    lines = []
+    for task in tasks:
+        lines.append(f'# ZeroPanel: {task["name"]}')
+        if task.get('enabled', True):
+            lines.append(f'{task["schedule"]} {task["command"]}')
+        else:
+            lines.append(f'# {task["schedule"]} {task["command"]}')
+    content = '\n'.join(lines) + '\n'
+
+    try:
+        result = subprocess.run(
+            ['crontab', '-'],
+            input=content,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        return result.returncode == 0, result.stderr.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route('/api/cron')
+@login_required
+def api_list_cron():
+    """列出当前用户的 crontab 任务"""
+    tasks = _parse_crontab()
+    return jsonify({'success': True, 'tasks': tasks})
+
+
+@app.route('/api/cron', methods=['POST'])
+@login_required
+def api_create_or_update_cron():
+    """创建或更新定时任务"""
+    data = request.get_json()
+    name = data.get('name', '').strip()
+    schedule = data.get('schedule', '').strip()
+    command = data.get('command', '').strip()
+    enabled = data.get('enabled', True)
+
+    if not name or not schedule or not command:
+        return jsonify({'success': False, 'message': '名称、调度表达式和命令不能为空'})
+
+    # 简单校验 schedule 格式：5 个字段
+    if len(schedule.split()) != 5:
+        return jsonify({'success': False, 'message': '调度表达式格式错误，应为 5 个字段'})
+
+    tasks = _parse_crontab()
+    new_task = {
+        'id': _cron_id(name, schedule, command),
+        'name': name,
+        'schedule': schedule,
+        'command': command,
+        'enabled': bool(enabled)
+    }
+
+    # 如果存在同名任务则更新
+    updated = False
+    for i, task in enumerate(tasks):
+        if task['name'] == name:
+            tasks[i] = new_task
+            updated = True
+            break
+    if not updated:
+        tasks.append(new_task)
+
+    success, stderr = _write_crontab(tasks)
+    if not success:
+        return jsonify({'success': False, 'message': '保存任务失败: ' + stderr})
+
+    return jsonify({'success': True, 'message': '任务已保存', 'task': new_task})
+
+
+@app.route('/api/cron/<task_id>', methods=['DELETE'])
+@login_required
+def api_delete_cron(task_id):
+    """删除定时任务"""
+    tasks = _parse_crontab()
+    new_tasks = [t for t in tasks if t['id'] != task_id]
+    if len(new_tasks) == len(tasks):
+        return jsonify({'success': False, 'message': '任务不存在'})
+
+    success, stderr = _write_crontab(new_tasks)
+    if not success:
+        return jsonify({'success': False, 'message': '删除任务失败: ' + stderr})
+
+    return jsonify({'success': True, 'message': '任务已删除'})
+
+
+@app.route('/api/cron/<task_id>/toggle', methods=['POST'])
+@login_required
+def api_toggle_cron(task_id):
+    """启用/禁用定时任务"""
+    tasks = _parse_crontab()
+    found = False
+    for task in tasks:
+        if task['id'] == task_id:
+            task['enabled'] = not task['enabled']
+            found = True
+            break
+
+    if not found:
+        return jsonify({'success': False, 'message': '任务不存在'})
+
+    success, stderr = _write_crontab(tasks)
+    if not success:
+        return jsonify({'success': False, 'message': '切换任务状态失败: ' + stderr})
+
+    return jsonify({'success': True, 'message': '任务状态已切换'})
 
 
 # ==================== API：系统监控 ====================
@@ -1769,7 +2470,7 @@ def api_system_services():
 @app.route('/api/system/start-services', methods=['POST'])
 @login_required
 def api_start_services():
-    """启动所有服务"""
+    """启动所有服务（优先 systemctl/service，回退直接启动守护进程）"""
     results = {}
 
     # 检查当前状态
@@ -1777,24 +2478,51 @@ def api_start_services():
 
     # 启动 MariaDB/MySQL
     if not current_status.get('mysql', False):
-        try:
-            subprocess.Popen(['mysqld_safe'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            results['mysql'] = {'success': True, 'message': 'MariaDB 启动中...'}
-        except Exception as e:
-            results['mysql'] = {'success': False, 'message': str(e)}
+        # 选择 mariadb/mysql 服务名
+        mysql_service = 'mysql'
+        if not _is_package_installed('mysql-server') and _is_package_installed('mariadb-server'):
+            mysql_service = 'mariadb'
+        daemon_cmd = ['mysqld_safe'] if shutil.which('mysqld_safe') else ['mysqld']
+        success, stderr = _start_service(mysql_service, daemon_cmd=daemon_cmd)
+        results['mysql'] = {
+            'success': success,
+            'message': 'MariaDB 启动中...' if success else stderr
+        }
     else:
         results['mysql'] = {'success': True, 'message': 'MariaDB 已在运行'}
 
-    # 启动 PHP-FPM
+    # 启动所有已安装的 PHP-FPM 版本
     if not current_status.get('php-fpm', False):
-        success, _, stderr = run_command(['php-fpm'])
-        results['php-fpm'] = {'success': success, 'message': 'PHP-FPM 已启动' if success else stderr}
+        installed_versions = _detect_installed_php_versions()
+        started_any = False
+        last_error = ''
+        for ver in installed_versions:
+            service = _php_fpm_service_name(ver)
+            # 优先 systemctl/service，回退直接启动守护进程
+            if _have_systemd():
+                success, _, stderr = run_command(['systemctl', 'start', service], timeout=30)
+                if not success:
+                    success, _, stderr = run_command(['service', service, 'start'], timeout=30)
+            else:
+                success, _, stderr = run_command(['service', service, 'start'], timeout=30)
+            if not success:
+                success, _, stderr = run_command([service], timeout=10)
+                if not success:
+                    success, _, stderr = run_command([f'php-fpm{ver}'], timeout=10)
+            if success:
+                started_any = True
+            else:
+                last_error = stderr
+        if started_any:
+            results['php-fpm'] = {'success': True, 'message': 'PHP-FPM 已启动'}
+        else:
+            results['php-fpm'] = {'success': False, 'message': last_error or '未找到可启动的 PHP-FPM'}
     else:
         results['php-fpm'] = {'success': True, 'message': 'PHP-FPM 已在运行'}
 
     # 启动 Nginx
     if not current_status.get('nginx', False):
-        success, _, stderr = run_command(['nginx'])
+        success, stderr = _start_service('nginx', daemon_cmd=['nginx'])
         results['nginx'] = {'success': success, 'message': 'Nginx 已启动' if success else stderr}
     else:
         results['nginx'] = {'success': True, 'message': 'Nginx 已在运行'}
@@ -1888,6 +2616,10 @@ def _backup_current_version(backup_file):
 
     # 面板主目录候选列表，支持迁移期兼容旧路径
     base_candidates = [BASE_DIR]
+    if str(BASE_DIR) == '/var/lib/zeropanel':
+        base_candidates.append(Path('/var/www/zeropanel'))
+    elif str(BASE_DIR) == '/var/www/zeropanel':
+        base_candidates.append(Path('/var/lib/zeropanel'))
     if str(BASE_DIR) == str(Path.home() / '.zeropanel'):
         base_candidates.append(Path.home() / 'zeropanel')
     elif str(BASE_DIR) == str(Path.home() / 'zeropanel'):
@@ -1909,7 +2641,14 @@ def _backup_current_version(backup_file):
         if resolved.exists() and (resolved / 'app.py').is_file():
             base_resolved = resolved
             break
-    # 2. 回退：选择第一个非空目录
+    # 2. 其次选择包含代码结构（templates/ 或 static/）的目录
+    if base_resolved is None:
+        for candidate in unique_candidates:
+            resolved = candidate.resolve()
+            if resolved.exists() and ((resolved / 'templates').is_dir() or (resolved / 'static').is_dir()):
+                base_resolved = resolved
+                break
+    # 3. 回退：选择第一个非空目录
     if base_resolved is None:
         for candidate in unique_candidates:
             resolved = candidate.resolve()
@@ -1953,11 +2692,11 @@ def _backup_current_version(backup_file):
 
 
 def _safe_extract_update(zip_path, target_dir):
-    """安全解压更新包，支持 zeropanel/、zeropanel-proot/ 根目录布局或扁平布局"""
+    """安全解压更新包，支持 zeropanel/ 根目录布局或扁平布局"""
     with zipfile.ZipFile(zip_path, 'r') as zf:
         members = zf.namelist()
         prefix = ''
-        for candidate in ['zeropanel/', 'zeropanel-proot/']:
+        for candidate in ['zeropanel/']:
             if any(m.startswith(candidate) for m in members):
                 prefix = candidate
                 break

@@ -59,6 +59,20 @@
                     </svg>
                     <span>系统监控</span>
                 </a>
+                <a href="/php" class="nav-item">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                        <polyline points="16 18 22 12 16 6"/>
+                        <polyline points="8 6 2 12 8 18"/>
+                    </svg>
+                    <span>PHP 管理</span>
+                </a>
+                <a href="/cron" class="nav-item">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                        <circle cx="12" cy="12" r="10"/>
+                        <polyline points="12 6 12 12 16 14"/>
+                    </svg>
+                    <span>定时任务</span>
+                </a>
                 <a href="/settings" class="nav-item">
                     <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
                         <circle cx="12" cy="12" r="3"/>
@@ -116,14 +130,13 @@
                                     <th>根目录</th>
                                     <th>PHP版本</th>
                                     <th>状态</th>
-                                    <th>数据库</th>
                                     <th>创建时间</th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
                             <tbody id="website-list">
                                 <tr class="empty-row">
-                                    <td colspan="8">
+                                    <td colspan="7">
                                         <div class="empty-state">
                                             <svg viewBox="0 0 24 24" width="48" height="48" stroke="#4a4a6a" stroke-width="2" fill="none">
                                                 <circle cx="12" cy="12" r="10"/>
@@ -178,21 +191,59 @@
                         <option value="7.4">PHP 7.4</option>
                     </select>
                 </div>
-                <div class="form-group form-check">
-                    <input type="checkbox" id="create-database" name="create_database">
-                    <label for="create-database">同时创建数据库</label>
-                    <small class="form-hint">勾选后会自动创建与网站同名的数据库和用户</small>
+                <div class="form-group" id="create-db-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="create_database" name="create_database">
+                        <span class="checkbox-custom"></span>
+                        <span class="checkbox-text">创建独立数据库</span>
+                    </label>
+                    <small class="form-hint">为网站自动创建同名数据库和用户</small>
                 </div>
-                <div class="form-group" id="db-password-row" style="display: none;">
-                    <label>数据库密码</label>
-                    <input type="text" id="db-password" name="db_password" placeholder="留空则自动生成随机密码">
-                    <small class="form-hint">数据库用户名与网站域名一致</small>
+                <div class="form-group">
+                    <label>伪静态规则</label>
+                    <select id="rewrite_template" onchange="applyRewriteTemplate(this.value)">
+                        <option value="">自定义</option>
+                        <option value="wordpress">WordPress</option>
+                        <option value="thinkphp">ThinkPHP</option>
+                        <option value="laravel">Laravel</option>
+                        <option value="typecho">Typecho</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <textarea id="rewrite_rules" name="rewrite_rules" rows="6" placeholder="输入伪静态规则，留空则不设置"></textarea>
+                    <small class="form-hint">选择常见模板会自动填充，也可手动编辑</small>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" onclick="hideCreateModal()">取消</button>
                     <button type="submit" class="btn btn-primary">创建</button>
                 </div>
             </form>
+        </div>
+    </div>
+    
+    <!-- 数据库信息弹窗 -->
+    <div class="modal" id="db-info-modal">
+        <div class="modal-overlay" onclick="hideDbInfoModal()"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>数据库信息</h2>
+                <button class="modal-close" onclick="hideDbInfoModal()">
+                    <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="info-list" id="db-info-list">
+                    <div class="empty-state">
+                        <p>暂无数据库信息</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="hideDbInfoModal()">关闭</button>
+            </div>
         </div>
     </div>
     

@@ -59,6 +59,60 @@ function formatNetwork(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+// 通用 API 请求封装
+async function apiRequest(url, options = {}) {
+    const defaultOptions = {
+        headers: {
+            'Accept': 'application/json',
+            ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+            ...options.headers
+        }
+    };
+    
+    try {
+        const response = await fetch(url, { ...defaultOptions, ...options });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        return await response.json();
+    } catch (error) {
+        console.error('API request failed:', url, error);
+        throw error;
+    }
+}
+
+// 显示全局加载遮罩
+function showLoading(message = '加载中...') {
+    let loader = document.getElementById('global-loading');
+    if (!loader) {
+        loader = document.createElement('div');
+        loader.id = 'global-loading';
+        loader.innerHTML = `
+            <div class="loading-overlay"></div>
+            <div class="loading-content">
+                <svg class="spinner" viewBox="0 0 24 24" width="32" height="32" stroke="currentColor" stroke-width="2" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke-dasharray="50" stroke-dashoffset="20" stroke-linecap="round"/>
+                </svg>
+                <span class="loading-text">${message}</span>
+            </div>
+        `;
+        document.body.appendChild(loader);
+    } else {
+        loader.querySelector('.loading-text').textContent = message;
+        loader.classList.remove('hidden');
+    }
+}
+
+// 隐藏全局加载遮罩
+function hideLoading() {
+    const loader = document.getElementById('global-loading');
+    if (loader) {
+        loader.classList.add('hidden');
+    }
+}
+
 // 更新圆形进度条
 function updateCircle(elementId, value) {
     const circle = document.getElementById(elementId);

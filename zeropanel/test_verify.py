@@ -76,7 +76,7 @@ def main():
         str(WWW_DIR / 'test'),
         '/etc/passwd',
         '/tmp',
-        str(Path.home() / 'www'),
+        '/var/www/html',
     ]
     for p in allowed_paths:
         _, ok = resolve_allowed_path(p)
@@ -134,7 +134,7 @@ def main():
     test('配置包含监听端口', 'listen 8080;' in config)
     test('配置包含 IPv6 双栈监听', 'listen [::]:8080 ipv6only=on;' in config)
     test('配置包含域名', 'server_name example.com;' in config)
-    test('配置包含 PHP sock', 'php-fpm.sock' in config)
+    test('配置包含 PHP sock', 'php8.0-fpm.sock' in config)
     test('配置包含根目录', 'root "/home/user/www/example.com";' in config)
     test('配置文件路径一致', get_nginx_config_path('example.com', 8080).name == 'example.com_8080.conf')
     # 含空格路径的 nginx 配置
@@ -321,8 +321,87 @@ def main():
 
     app_module.run_command = original_run_command
 
-    # 13. 删除云更新备份接口
-    print('\n13. 删除云更新备份接口')
+    # 13. PHP 版本可用性探测
+    print('\n13. PHP 版本可用性探测')
+
+    original_run_command = app_module.run_command
+
+    def _reset_cache():
+        app_module._php_availability_cache = {'ts': 0, 'data': {}}
+
+    # 源中存在该版本（Candidate 有版本号）
+    def mock_policy_available(cmd, shell=False):
+        if cmd and cmd[0] == 'apt-cache':
+            pkg = cmd[2] if len(cmd) > 2 else ''
+            return True, f'{pkg}:\n  Installed: (none)\n  Candidate: 8.2.32-1~deb12u1\n', ''
+        return original_run_command(cmd, shell=shell)
+
+    app_module.run_command = mock_policy_available
+    _reset_cache()
+    test('源中存在版本探测通过', app_module._php_version_available('8.2'))
+
+    # 源中不存在该版本（Candidate (none)）
+    def mock_policy_none(cmd, shell=False):
+        if cmd and cmd[0] == 'apt-cache':
+            pkg = cmd[2] if len(cmd) > 2 else ''
+            return True, f'{pkg}:\n  Installed: (none)\n  Candidate: (none)\n', ''
+        return original_run_command(cmd, shell=shell)
+
+    app_module.run_command = mock_policy_none
+    _reset_cache()
+    test('Candidate(none) 探测为不可用', not app_module._php_version_available('8.0'))
+
+    # 包完全不在索引中（apt-cache policy 输出为空）
+    def mock_policy_empty(cmd, shell=False):
+        if cmd and cmd[0] == 'apt-cache':
+            return True, '', ''
+        return original_run_command(cmd, shell=shell)
+
+    app_module.run_command = mock_policy_empty
+    _reset_cache()
+    test('索引无此包探测为不可用', not app_module._php_version_available('7.4'))
+
+    # apt-cache 命令执行失败
+    def mock_policy_fail(cmd, shell=False):
+        if cmd and cmd[0] == 'apt-cache':
+            return False, '', 'command not found'
+        return original_run_command(cmd, shell=shell)
+
+    app_module.run_command = mock_policy_fail
+    _reset_cache()
+    test('命令失败探测为不可用', not app_module._php_version_available('8.1'))
+
+    # 缓存：首次探测全量执行一次，30 秒内重复调用不再执行
+    calls = {'n': 0}
+
+    def mock_policy_count(cmd, shell=False):
+        if cmd and cmd[0] == 'apt-cache':
+            calls['n'] += 1
+            pkg = cmd[2] if len(cmd) > 2 else ''
+            return True, f'{pkg}:\n  Installed: (none)\n  Candidate: 8.2.32-1~deb12u1\n', ''
+        return original_run_command(cmd, shell=shell)
+
+    app_module.run_command = mock_policy_count
+    _reset_cache()
+    app_module._php_version_available('8.2')
+    app_module._php_version_available('8.2')
+    test('探测结果缓存生效', calls['n'] == len(app_module.SUPPORTED_PHP_VERSIONS))
+
+    # 版本列表接口返回 available 字段
+    app_module.run_command = mock_policy_available
+    _reset_cache()
+    with app.test_client() as c:
+        c.post('/api/login', json={'username': 'admin', 'password': 'admin123'})
+        data = c.get('/api/php/versions').get_json()
+    versions = data.get('versions', [])
+    test('版本列表包含 available 字段', all('available' in v for v in versions))
+    v82 = next((v for v in versions if v['version'] == '8.2'), None)
+    test('源中可用版本 available=True', v82 is not None and v82['available'])
+
+    app_module.run_command = original_run_command
+
+    # 14. 删除云更新备份接口
+    print('\n14. 删除云更新备份接口')
 
     import app as backup_app
     update_backup_dir = backup_app.UPDATE_BACKUP_DIR
@@ -369,12 +448,12 @@ def main():
         if test_backup.exists():
             test_backup.unlink()
 
-    # 14. 备份路径统一（云更新备份与卸载备份共用统一目录）
-    print('\n14. 备份路径统一')
+    # 15. 备份路径统一（云更新备份与卸载备份共用统一目录）
+    print('\n15. 备份路径统一')
 
     import app as backup_app
     test('云更新备份位于统一备份根目录下', str(backup_app.UPDATE_BACKUP_DIR).startswith(str(backup_app.BACKUP_ROOT) + os.sep))
-    test('统一备份根目录位于用户主目录下', str(backup_app.BACKUP_ROOT).startswith(str(Path.home()) + os.sep))
+    test('统一备份根目录与面板目录平级', str(backup_app.BACKUP_ROOT).startswith(str(backup_app.BASE_DIR.parent) + os.sep))
     test('云更新备份目录不在面板目录内', not str(backup_app.UPDATE_BACKUP_DIR).startswith(str(backup_app.BASE_DIR) + os.sep))
 
     print('\n' + '=' * 50)
