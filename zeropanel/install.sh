@@ -296,7 +296,7 @@ uninstall_full() {
         stop_service nginx nginx
         stop_service mysql mysqld
         stop_service mariadb mariadbd
-        for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+        for ver in 8.5 8.4 8.3 8.2 8.1 8.0 7.4; do
             stop_service "php${ver//./}-fpm" "php${ver//./}-fpm" 2>/dev/null || true
         done
         pkill -f "python3 app.py" 2>/dev/null || true
@@ -365,7 +365,7 @@ uninstall_linux() {
 
 # 启动所有已安装的 PHP-FPM 版本（优先 systemctl/service，回退直接启动）
 start_php_fpm_all() {
-    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+    for ver in 8.5 8.4 8.3 8.2 8.1 8.0 7.4; do
         local svc="php${ver//./}-fpm"
         if command_exists "$svc" 2>/dev/null && ! pgrep -f "$svc" >/dev/null; then
             if have_systemd; then
@@ -528,7 +528,7 @@ install_linux() {
 
     echo -e "  ${CYAN}配置 PHP-FPM...${NC}"
     # 查找可用的 PHP-FPM 版本，每个版本使用独立 socket
-    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+    for ver in 8.5 8.4 8.3 8.2 8.1 8.0 7.4; do
         local pool_conf="/etc/php/${ver}/fpm/pool.d/www.conf"
         if [ -f "$pool_conf" ]; then
             cp "$pool_conf" "$pool_conf.bak"
@@ -642,7 +642,7 @@ python_cmd() {
 }
 
 start_php_fpm_all() {
-    for ver in 8.4 8.3 8.2 8.1 8.0 7.4; do
+    for ver in 8.5 8.4 8.3 8.2 8.1 8.0 7.4; do
         local svc="php\${ver//./}-fpm"
         if command -v "\$svc" >/dev/null 2>&1 && ! pgrep -f "\$svc" >/dev/null; then
             if have_systemd; then
