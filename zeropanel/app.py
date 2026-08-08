@@ -57,9 +57,9 @@ except Exception:
 
 # 云更新配置：读取版本号和更新说明
 UPDATE_CONFIG = {
-    'version_url': 'https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/VERSION',
-    'download_url': 'https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel_v2.zip',
-    'release_notes_url': 'https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/CHANGELOG.md'
+    'version_url': 'https://raw.githubusercontent.com/qinfei12/ZeroPanel/trae/agent-zipvKL/zeropanel/VERSION',
+    'download_url': 'https://github.com/qinfei12/ZeroPanel/archive/refs/heads/trae/agent-zipvKL.zip',
+    'release_notes_url': 'https://raw.githubusercontent.com/qinfei12/ZeroPanel/trae/agent-zipvKL/zeropanel/CHANGELOG.md'
 }
 
 NGINX_CONF_DIR = Path('/etc/nginx/conf.d')
@@ -2692,13 +2692,20 @@ def _backup_current_version(backup_file):
 
 
 def _safe_extract_update(zip_path, target_dir):
-    """安全解压更新包，支持 zeropanel/ 根目录布局或扁平布局"""
+    """安全解压更新包，支持 zeropanel/ 顶层目录或 GitHub archive 嵌套布局"""
     with zipfile.ZipFile(zip_path, 'r') as zf:
         members = zf.namelist()
         prefix = ''
-        for candidate in ['zeropanel/']:
-            if any(m.startswith(candidate) for m in members):
-                prefix = candidate
+        # 检测 zeropanel/ 目录前缀：
+        # - 顶层布局: zeropanel/...
+        # - GitHub archive 嵌套布局: <repo>-<branch>/zeropanel/...
+        for m in members:
+            if m.startswith('zeropanel/'):
+                prefix = 'zeropanel/'
+                break
+            idx = m.find('/zeropanel/')
+            if idx > 0:
+                prefix = m[:idx + len('/zeropanel/')]
                 break
         prefix_len = len(prefix)
 

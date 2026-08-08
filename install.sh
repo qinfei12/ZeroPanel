@@ -53,7 +53,7 @@ main() {
 
             local tmp_script
             tmp_script=$(mktemp)
-            if curl -fsSL -o "$tmp_script" "https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/install.sh"; then
+            if curl -fsSL -o "$tmp_script" "https://raw.githubusercontent.com/qinfei12/ZeroPanel/trae/agent-zipvKL/zeropanel/install.sh"; then
                 chmod +x "$tmp_script"
                 bash "$tmp_script" "$@"
                 rm -f "$tmp_script"
@@ -69,7 +69,7 @@ main() {
             echo -e "    ${CYAN}Ubuntu / Debian 等 Linux 服务器${NC}"
             echo ""
             echo -e "  ${YELLOW}请使用对应命令安装：${NC}"
-            echo -e "    ${CYAN}Linux:${NC}  bash <(curl -fsSL https://raw.githubusercontent.com/2136206076/ZeroPanel/main/install.sh)"
+            echo -e "    ${CYAN}Linux:${NC}  bash <(curl -fsSL https://raw.githubusercontent.com/qinfei12/ZeroPanel/trae/agent-zipvKL/install.sh)"
             echo ""
             exit 1
             ;;

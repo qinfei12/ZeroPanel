@@ -21,7 +21,7 @@ WWW_DIR="/var/www"
 DATA_DIR="$PANEL_DIR/data"
 # 统一备份根目录：云更新备份与卸载备份共用（与面板目录平级，卸载不影响）
 BACKUP_ROOT="/var/lib/zeropanel_backups"
-PANEL_DOWNLOAD_URL="https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel_v2.zip"
+PANEL_DOWNLOAD_URL="https://github.com/qinfei12/ZeroPanel/archive/refs/heads/trae/agent-zipvKL.zip"
 
 # 打印分隔线
 print_separator() {
@@ -438,7 +438,7 @@ install_linux() {
     echo -e "    地址: ${WHITE}$PANEL_DOWNLOAD_URL${NC}"
 
     local tmp_dir=$(mktemp -d)
-    local zip_file="$tmp_dir/zeropanel_v2.zip"
+    local zip_file="$tmp_dir/zeropanel_archive.zip"
 
     if curl -fsSL -o "$zip_file" "$PANEL_DOWNLOAD_URL"; then
         print_success "面板下载完成"
@@ -463,10 +463,23 @@ install_linux() {
 
     local extract_tmp=$(mktemp -d)
     if unzip -q "$zip_file" -d "$extract_tmp"; then
-        # zip 顶层目录为 zeropanel，需移动到 /var/lib/zeropanel
-        rm -rf "$PANEL_DIR"
-        mv "$extract_tmp/zeropanel" "$PANEL_DIR"
-        print_success "面板部署完成"
+        # GitHub archive 顶层目录为 ZeroPanel-<branch>/，zeropanel/ 在其下；
+        # 也兼容顶层直接为 zeropanel/ 的扁平布局
+        local panel_src=""
+        if [ -d "$extract_tmp/zeropanel" ]; then
+            panel_src="$extract_tmp/zeropanel"
+        else
+            panel_src=$(find "$extract_tmp" -maxdepth 2 -type d -name "zeropanel" 2>/dev/null | head -1)
+        fi
+        if [ -n "$panel_src" ] && [ -d "$panel_src" ]; then
+            rm -rf "$PANEL_DIR"
+            mv "$panel_src" "$PANEL_DIR"
+            print_success "面板部署完成"
+        else
+            print_error "未找到面板目录 zeropanel/"
+            rm -rf "$tmp_dir" "$extract_tmp"
+            exit 1
+        fi
     else
         print_error "面板解压失败"
         rm -rf "$tmp_dir" "$extract_tmp"

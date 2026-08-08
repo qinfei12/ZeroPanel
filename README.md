@@ -62,13 +62,13 @@
 #### Linux (Ubuntu/Debian)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/2136206076/ZeroPanel/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/qinfei12/ZeroPanel/trae/agent-zipvKL/install.sh)
 ```
 
 或直接使用面板专用安装脚本：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/qinfei12/ZeroPanel/trae/agent-zipvKL/zeropanel/install.sh)
 ```
 
 安装过程会自动完成：
@@ -99,12 +99,13 @@ http://localhost:5000
 
 ```bash
 apt-get update -y
-apt-get install -y python3 python3-pip nginx mariadb-server php-fpm php-mysql curl unzip cron
+apt-get install -y python3 python3-pip nginx mariadb-server php-fpm php-mysql curl unzip cron git
 pip3 install --break-system-packages flask flask-cors werkzeug || pip3 install flask flask-cors werkzeug
-cd /var/lib
-curl -fsSL -O https://raw.githubusercontent.com/2136206076/ZeroPanel/main/zeropanel_v2.zip
-unzip zeropanel_v2.zip -d /var/lib
-# 面板程序会解压到 /var/lib/zeropanel，网站目录为 /var/www
+# 克隆仓库并部署面板
+git clone -b trae/agent-zipvKL --depth 1 https://github.com/qinfei12/ZeroPanel.git /tmp/zeropanel_src
+mv /tmp/zeropanel_src/zeropanel /var/lib/zeropanel
+rm -rf /tmp/zeropanel_src
+# 面板程序位于 /var/lib/zeropanel，网站目录为 /var/www
 zeropanel start
 ```
 
@@ -164,7 +165,7 @@ zeropanel help       # 显示帮助
 
 | 版本文件 | 对应面板 | 下载包 |
 |---|---|---|
-| Linux 版 | `zeropanel/` | `zeropanel_v2.zip` |
+| Linux 版 | `zeropanel/` | GitHub archive（`trae/agent-zipvKL` 分支） |
 
 > 注意：云更新时请勿中断网络，更新失败可通过备份 ZIP 手动恢复。
 
@@ -395,7 +396,6 @@ ZeroPanel/
 │   ├── data/              # 运行时数据（自动生成，不入库）
 │   ├── static/            # 静态资源
 │   └── templates/         # HTML 模板
-└── zeropanel_v2.zip       # Linux 版分发包（发布时生成）
 ```
 
 ---
@@ -423,23 +423,20 @@ python3 test_verify.py
 ### 发布新版本
 
 ```bash
-python3 build.py patch   # 或 minor / major
-```
+# 1. 更新 VERSION 文件
+echo "2.1.1" > VERSION
+echo "2.1.1" > zeropanel/VERSION
 
-`build.py` 会自动：
+# 2. 追加更新日志到 CHANGELOG.md
 
-1. 更新 `VERSION` 文件
-2. 同步 `app.py` 中的 `PANEL_VERSION`
-3. 追加更新日志到 `CHANGELOG.md`
-4. 重新打包 `zeropanel_v2.zip`
-
-然后提交并推送：
-
-```bash
+# 3. 提交并推送
 git add -A
 git commit -m "release: v$(cat VERSION)"
-git push origin main
+git push origin trae/agent-zipvKL
 ```
+
+> 面板不再使用独立的 `zeropanel_v2.zip` 分发包，云更新直接从 GitHub 仓库
+> `trae/agent-zipvKL` 分支下载 archive 并提取 `zeropanel/` 目录。
 
 ---
 

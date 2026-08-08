@@ -8,6 +8,8 @@
   - 删除原 `zeropanel/`（Termux 轻量版）目录与对应的 `zeropanel_v2.zip` 分发包
   - 原 `zeropanel-proot/`（Proot 高级版）移植为普通 Linux 版并更名为 `zeropanel/`
   - 仓库现只保留一个面向 Ubuntu / Debian 等 Linux 服务器的版本，不再区分 Termux / Proot
+  - 不再使用独立的 `zeropanel_v2.zip` 分发包，安装与云更新改为从 GitHub 仓库
+    `qinfei12/ZeroPanel` 的 `trae/agent-zipvKL` 分支下载 archive 并提取 `zeropanel/` 目录
 
 - **服务管理适配普通 Linux（支持 systemd）**
   - 新增 systemd 检测：启动 / 停止服务时优先使用 `systemctl`，其次 `service`，最后回退直接启动守护进程
@@ -15,8 +17,8 @@
   - 影响范围：`app.py` 的 `api_start_services`、`api_restart_php_fpm`，以及安装脚本与 `zeropanel` 快捷命令的服务启停逻辑
 
 - **云更新地址与解压路径更新**
-  - 云更新读取 `zeropanel/VERSION` 与 `zeropanel/CHANGELOG.md`，下载包改为 `zeropanel_v2.zip`
-  - 安装脚本与 `_safe_extract_update` 改为处理 `zeropanel/` 顶层目录布局
+  - 云更新读取 `zeropanel/VERSION` 与 `zeropanel/CHANGELOG.md`，下载包改为 GitHub archive
+  - 安装脚本与 `_safe_extract_update` 改为处理 `zeropanel/` 顶层目录或 GitHub archive 嵌套布局
 
 ### 其他
 
